@@ -88,6 +88,7 @@ namespace
 	{
 		tb::paths::set_directory(self_directory());
 		tb::config::load();
+		tb::log("toolbox", "IIDX Toolbox (built " __DATE__ " " __TIME__ ") loading");
 
 		if (const HMODULE h = find_game_module())
 		{
@@ -136,8 +137,8 @@ extern "C" __declspec(dllexport) int __cdecl spice_sdk_entry_point(spice_init_fu
 {
 	static spice_sdk_v0 sdk{};
 	sdk.size = sizeof(sdk);
-	if (!init_func || init_func(0, spice_destroy, &sdk) != 0)
-		return 0;
+	if (init_func)
+		init_func(0, spice_destroy, &sdk);
 	std::call_once(g_init_once, init);
 	return 1;
 }
@@ -152,15 +153,20 @@ extern "C" __declspec(dllexport) void __cdecl iidx_toolbox_shutdown()
 	shutdown();
 }
 
+// spice2x -k only calls LoadLibrary. Init runs on a thread, which starts once
+// the loader lock is released, well before the game creates its D3D device.
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
 	if (reason == DLL_PROCESS_ATTACH)
 	{
 		g_self = instance;
 		DisableThreadLibraryCalls(instance);
-		tb::paths::set_directory(self_directory());
-		if (GetPrivateProfileIntA("general", "AutoInit", 0, tb::paths::file("iidx_toolbox.ini").c_str()) != 0)
+		const HANDLE thread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
 			std::call_once(g_init_once, init);
+			return 0;
+		}, nullptr, 0, nullptr);
+		if (thread)
+			CloseHandle(thread);
 	}
 	else if (reason == DLL_PROCESS_DETACH && reserved)
 	{
