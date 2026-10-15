@@ -32,7 +32,7 @@
 
 ### 高精度帧同步（MS CLOCK）
 
-谱面滚动直接锚定音频位置与垂直同步（VSync），消除 CPU 波动导致的视觉卡顿、掉帧追赶和音画慢漂移（仅在标准 60Hz LDJ / 120Hz TDJ 下生效）。
+谱面按帧推进，并锚定音频位置，消除音画慢漂移（仅在标准 60Hz LDJ / 120Hz TDJ 下生效）。
 
 ### 系统性能优化（System）
 
@@ -74,7 +74,7 @@ Set transparency (75% / 50% / 25% / 0% or custom) for Bombs, Key Beams, and Judg
 
 ### MS CLOCK
 
-Syncs chart scrolling directly to VSync and audio position instead of frame counting. Eliminates CPU micro-stutter, catches up missed VSyncs, and prevents audio drift (Active at native 60Hz LDJ / 120Hz TDJ).
+Keeps the chart on the audio position, only real dropped frames and slow drift are corrected (native 60Hz LDJ / 120Hz TDJ only).
 
 ### System Boost
 
