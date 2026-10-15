@@ -5,9 +5,10 @@
 ## 安装与启动
 
 - **启动方式：** 使用 `spice64.exe -k iidx_toolbox.dll` 挂载启动。
-- **配置文件：** 自动保存在同目录的 `iidx_toolbox.ini`，日志为 `iidx_toolbox.log`。
+- **配置文件：** 自动保存在同目录 `iidx_toolbox.ini`，日志为 `iidx_toolbox.log`。
+- 默认按 Insert 呼出，可在ini调整快捷键
 
-## 功能列表（默认按 Insert 呼出，可在ini调整快捷键）
+## 功能列表
 
 ### 自定义随机（Random Fix）
 
@@ -48,8 +49,9 @@ A spice2x enhancement plugin for IIDX. It provides an in-game menu for custom fu
 
 - **Load:** Run `spice64.exe -k iidx_toolbox.dll`.
 - **Config & Logs:** Saved to `iidx_toolbox.ini` and `iidx_toolbox.log` in the DLL folder. (Unsupported features on mismatched game versions will be skipped).
+- By default, press Insert for menu GUI; saves on close.
 
-## Features (Press Insert for mouse menu; saves on close)
+## Features
 
 ### Random Fix (Per-side)
 
