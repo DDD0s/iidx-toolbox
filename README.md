@@ -1,6 +1,6 @@
 # IIDX Toolbox
 
-为街机版 IIDX提供额外功能。
+为IIDX提供额外功能。
 
 ## 安装与启动
 
@@ -42,7 +42,7 @@
 
 # IIDX Toolbox
 
-A spice2x enhancement plugin for arcade IIDX. It provides an in-game menu for custom functions.
+A spice2x enhancement plugin for IIDX. It provides an in-game menu for custom functions.
 
 ## Setup & Usage
 
