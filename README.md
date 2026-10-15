@@ -5,11 +5,11 @@
 ## 安装与启动
 
 - **启动方式：** 使用 `spice64.exe -k iidx_toolbox.dll` 挂载启动。
-- **配置文件：** 自动保存在同目录的 `iidx_toolbox.ini`，日志为 `iidx_toolbox.log`（特征码不匹配的功能会自动跳过，不会导致游戏崩溃）。
+- **配置文件：** 自动保存在同目录的 `iidx_toolbox.ini`，日志为 `iidx_toolbox.log`。
 
-## 功能列表（默认按 Insert 呼出鼠标菜单，关闭自动保存）
+## 功能列表（默认按 Insert 呼出，可在ini调整快捷键）
 
-### 自定义乱（Random Fix）
+### 自定义随机（Random Fix）
 
 - **固定排列：** 自由指定 RANDOM 的键位顺序（1P/2P 独立设置）。
 - **乱 按钮：** 每局重新随机抽一次排列。
@@ -47,7 +47,7 @@ A spice2x enhancement plugin for arcade IIDX. It provides an in-game menu for cu
 ## Setup & Usage
 
 - **Load:** Run `spice64.exe -k iidx_toolbox.dll`.
-- **Config & Logs:** Saved to `iidx_toolbox.ini` and `iidx_toolbox.log` in the DLL folder. (Unsupported features on mismatched game versions are safely skipped).
+- **Config & Logs:** Saved to `iidx_toolbox.ini` and `iidx_toolbox.log` in the DLL folder. (Unsupported features on mismatched game versions will be skipped).
 
 ## Features (Press Insert for mouse menu; saves on close)
 
