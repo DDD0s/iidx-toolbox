@@ -10,7 +10,8 @@
 namespace tb::config
 {
 	void load();
-	void save();
+	void save();       // on a background thread, coalesced
+	void save_final(); // at exit; skipped if a background save is still writing
 
 	bool log_enabled();
 	int menu_key(); // virtual-key code, default VK_INSERT

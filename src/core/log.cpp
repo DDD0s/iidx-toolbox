@@ -48,7 +48,6 @@ namespace tb
 
 		void worker(HANDLE file)
 		{
-			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 			std::string batch;
 			for (;;)
 			{
@@ -103,11 +102,25 @@ namespace tb
 				return;
 			}
 			g_worker = std::thread(worker, file);
-			std::atexit([] { flush_log(); });
 		}
 		g_pending.append(line, static_cast<size_t>(n));
 		lock.unlock();
 		g_cv.notify_one();
+	}
+
+	void flush_log_at_exit()
+	{
+		// the writer may have died holding the mutex; nothing else runs now
+		std::unique_lock lock(g_mutex, std::try_to_lock);
+		g_stopped = true;
+		if (!g_pending.empty())
+		{
+			std::string rest;
+			rest.swap(g_pending);
+			write_direct(rest);
+		}
+		if (g_worker.joinable())
+			g_worker.detach();
 	}
 
 	void flush_log()

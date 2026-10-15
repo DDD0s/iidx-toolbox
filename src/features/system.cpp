@@ -60,7 +60,13 @@ namespace tb::system
 				state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
 				state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
 				state.StateMask = 0;
-				const BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+				BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+				if (!ok)
+				{
+					// the timer flag needs Windows 11
+					state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+					ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+				}
 				tb::log("system", "power throttling off: %s", ok ? "ok" : "not supported");
 			}
 

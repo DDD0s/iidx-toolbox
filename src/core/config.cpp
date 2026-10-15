@@ -1,6 +1,7 @@
 #include "std_include.hpp"
 
 #include <cctype>
+#include <thread>
 
 #include "config.hpp"
 #include "paths.hpp"
@@ -20,6 +21,8 @@ namespace tb::config
 	{
 		std::mutex g_random_mutex;
 		random_t g_random{};
+		std::mutex g_file_mutex; // WritePrivateProfileString rewrites the whole file
+		std::atomic<bool> g_save_queued{ false };
 		bool g_log = true;
 		int g_menu_key = VK_INSERT;
 
@@ -102,11 +105,23 @@ namespace tb::config
 			write("random", (k + "Group").c_str(), side.group ? "1" : "0");
 		}
 
-		void save_random_locked()
+		void write_all()
 		{
-			write("random", "Enabled", g_random.enabled ? "1" : "0");
-			write_side("P1", g_random.side[0]);
-			write_side("P2", g_random.side[1]);
+			const random_t random = [] {
+				std::lock_guard lock(g_random_mutex);
+				return g_random;
+			}();
+			write("random", "Enabled", random.enabled ? "1" : "0");
+			write_side("P1", random.side[0]);
+			write_side("P2", random.side[1]);
+			write("timing", "MillisecondClock", timing_enabled ? "1" : "0");
+			write("chart", "AllScratch", all_scratch ? "1" : "0");
+			write("chart", "AllCharge", all_charge ? "1" : "0");
+			write("effects", "BombOpacity", std::to_string(bomb_opacity.load()));
+			write("effects", "BeamOpacity", std::to_string(beam_opacity.load()));
+			write("effects", "JudgeOpacity", std::to_string(judge_opacity.load()));
+			write("effects", "PGreatBlue", pgreat_blue ? "1" : "0");
+			write("effects", "NoBlink", no_blink ? "1" : "0");
 		}
 	}
 
@@ -133,20 +148,24 @@ namespace tb::config
 		no_blink = read_int("effects", "NoBlink", 0) != 0;
 	}
 
+	// file writes take milliseconds; never on the game or render thread
 	void save()
 	{
-		{
-			std::lock_guard lock(g_random_mutex);
-			save_random_locked();
-		}
-		write("timing", "MillisecondClock", timing_enabled ? "1" : "0");
-		write("chart", "AllScratch", all_scratch ? "1" : "0");
-		write("chart", "AllCharge", all_charge ? "1" : "0");
-		write("effects", "BombOpacity", std::to_string(bomb_opacity.load()));
-		write("effects", "BeamOpacity", std::to_string(beam_opacity.load()));
-		write("effects", "JudgeOpacity", std::to_string(judge_opacity.load()));
-		write("effects", "PGreatBlue", pgreat_blue ? "1" : "0");
-		write("effects", "NoBlink", no_blink ? "1" : "0");
+		if (g_save_queued.exchange(true))
+			return;
+		std::thread([] {
+			Sleep(100);
+			g_save_queued = false;
+			std::lock_guard lock(g_file_mutex);
+			write_all();
+		}).detach();
+	}
+
+	void save_final()
+	{
+		std::unique_lock lock(g_file_mutex, std::try_to_lock);
+		if (lock.owns_lock())
+			write_all();
 	}
 
 	bool log_enabled()
@@ -167,32 +186,36 @@ namespace tb::config
 
 	void set_random(const random_t& before, const random_t& after)
 	{
-		std::lock_guard lock(g_random_mutex);
-		if (before.enabled != after.enabled)
-			g_random.enabled = after.enabled;
-		for (int s = 0; s < 2; ++s)
 		{
-			const auto& b = before.side[s];
-			const auto& a = after.side[s];
-			auto& cur = g_random.side[s];
-			if (b.perm != a.perm)
-				cur.perm = a.perm;
-			if (b.ran != a.ran)
-				cur.ran = a.ran;
-			if (b.group != a.group)
-				cur.group = a.group;
-			if (cur.group)
-				cur.ran = false;
+			std::lock_guard lock(g_random_mutex);
+			if (before.enabled != after.enabled)
+				g_random.enabled = after.enabled;
+			for (int s = 0; s < 2; ++s)
+			{
+				const auto& b = before.side[s];
+				const auto& a = after.side[s];
+				auto& cur = g_random.side[s];
+				if (b.perm != a.perm)
+					cur.perm = a.perm;
+				if (b.ran != a.ran)
+					cur.ran = a.ran;
+				if (b.group != a.group)
+					cur.group = a.group;
+				if (cur.group)
+					cur.ran = false;
+			}
 		}
-		save_random_locked();
+		save();
 	}
 
 	void store_drawn(int side, const random_logic::perm_t& perm)
 	{
 		if (side < 0 || side > 1)
 			return;
-		std::lock_guard lock(g_random_mutex);
-		g_random.side[side].perm = perm;
-		save_random_locked();
+		{
+			std::lock_guard lock(g_random_mutex);
+			g_random.side[side].perm = perm;
+		}
+		save();
 	}
 }
