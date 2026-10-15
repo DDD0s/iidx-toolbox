@@ -30,16 +30,15 @@ namespace tb::random_fix
 		option_pred_t g_is_autoscratch = nullptr;
 		getter_t g_io = nullptr;
 		ticket_pred_t g_ticket_armed = nullptr;
-		std::mt19937 g_rng{ std::random_device{}() };
-
-		void apply_stub(uint8_t* obj)
+		// seeded on first use (play start), not in DllMain
+		std::mt19937& rng()
 		{
-			g_apply.invoke<void>(obj);
+			static std::mt19937 engine{ std::random_device{}() };
+			return engine;
+		}
 
-			const auto cfg = config::get_random();
-			if (!obj || !cfg.enabled)
-				return;
-
+		void apply_fixed(uint8_t* obj, const config::random_t& cfg)
+		{
 			void* options = g_options();
 			const int dp = g_is_dp() != 0 ? 1 : 0;
 			for (int side = 0; side < 2; ++side)
@@ -67,7 +66,7 @@ namespace tb::random_fix
 				const char* kind = "fixed";
 				if (sc.group || sc.ran)
 				{
-					sc.perm = sc.group ? group_random_perm(sc.perm, g_rng) : random_perm(g_rng);
+					sc.perm = sc.group ? group_random_perm(sc.perm, rng()) : random_perm(rng());
 					kind = sc.group ? "group" : "ran";
 					config::store_drawn(side, sc.perm);
 				}
@@ -80,6 +79,15 @@ namespace tb::random_fix
 				tb::log("random", "side %d %s %s (%s)%s", side, kind, screen_order(sc.perm).c_str(),
 					color_pattern(sc.perm).c_str(), mirror ? " +mirror" : "");
 			}
+		}
+
+		uint64_t apply_stub(uint8_t* obj)
+		{
+			const auto result = g_apply.invoke<uint64_t>(obj);
+			const auto cfg = config::get_random();
+			if (obj && cfg.enabled)
+				apply_fixed(obj, cfg);
+			return result;
 		}
 
 		// one-call predicate: sub rsp,28h ; call getter ; cmp eax,1 ; setz al ; add rsp,28h ; ret
