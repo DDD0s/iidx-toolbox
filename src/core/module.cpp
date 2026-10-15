@@ -128,4 +128,26 @@ namespace tb::module
 		std::memcpy(&disp, at, 4);
 		return at + 4 + extra + disp;
 	}
+
+	void** import_slot(const char* dll, uint16_t ordinal)
+	{
+		if (!g_handle)
+			return nullptr;
+		auto* base = reinterpret_cast<uint8_t*>(g_handle);
+		const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+		const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+		if (!dir.VirtualAddress)
+			return nullptr;
+		for (auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); desc->Name; ++desc)
+		{
+			if (_stricmp(reinterpret_cast<const char*>(base + desc->Name), dll) != 0)
+				continue;
+			const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk));
+			auto* slots = reinterpret_cast<void**>(base + desc->FirstThunk);
+			for (size_t i = 0; names[i].u1.AddressOfData; ++i)
+				if (IMAGE_SNAP_BY_ORDINAL(names[i].u1.Ordinal) && IMAGE_ORDINAL(names[i].u1.Ordinal) == ordinal)
+					return &slots[i];
+		}
+		return nullptr;
+	}
 }

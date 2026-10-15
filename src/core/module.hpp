@@ -19,4 +19,7 @@ namespace tb::module
 
 	// target of a rel32 operand at 'at' (next instruction = at + 4 + extra)
 	uint8_t* rel32(uint8_t* at, int extra = 0);
+
+	// import address table slot of an ordinal import, nullptr if absent
+	void** import_slot(const char* dll, uint16_t ordinal);
 }
