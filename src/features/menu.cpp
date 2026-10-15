@@ -20,6 +20,7 @@ namespace tb::menu
 		bool g_unicode = false;
 		bool g_imgui_ready = false;
 		bool g_imgui_failed = false;
+		IDirect3DDevice9* g_imgui_device = nullptr;
 		bool g_key_was_down = false;
 		LARGE_INTEGER g_last_time{};
 		float g_scale = 1.f;
@@ -45,15 +46,19 @@ namespace tb::menu
 			}
 		}
 
+		// digits from WM_KEYDOWN: the game's message loop may not call TranslateMessage
+		// (no WM_CHAR); the menu's fields only take digits
 		LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		{
-			if (g_open)
+			if (g_open && (msg == WM_KEYDOWN || msg == WM_KEYUP))
 			{
 				std::lock_guard lock(g_input_mutex);
-				if (msg == WM_CHAR && wparam >= 32 && wparam < 127)
-					g_chars.push_back(static_cast<unsigned int>(wparam));
-				else if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && vk_to_key(wparam) != ImGuiKey_None)
+				if (vk_to_key(wparam) != ImGuiKey_None)
 					g_key_events.emplace_back(static_cast<int>(vk_to_key(wparam)), msg == WM_KEYDOWN);
+				else if (msg == WM_KEYDOWN && wparam >= '0' && wparam <= '9')
+					g_chars.push_back(static_cast<unsigned int>(wparam));
+				else if (msg == WM_KEYDOWN && wparam >= VK_NUMPAD0 && wparam <= VK_NUMPAD9)
+					g_chars.push_back(static_cast<unsigned int>('0' + (wparam - VK_NUMPAD0)));
 			}
 			return g_unicode ? CallWindowProcW(g_old_wndproc, hwnd, msg, wparam, lparam)
 				: CallWindowProcA(g_old_wndproc, hwnd, msg, wparam, lparam);
@@ -110,12 +115,14 @@ namespace tb::menu
 			io.IniFilename = nullptr;
 			io.LogFilename = nullptr;
 			io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+			io.ConfigErrorRecoveryEnableAssert = false; // a UI mistake must never abort the game
 
 			g_scale = std::clamp(static_cast<float>(pp.BackBufferHeight) / 1080.f, 0.75f, 3.f);
 			load_fonts(g_scale);
 			menu_ui::apply_style(g_scale);
 			if (!ImGui_ImplDX9_Init(d3d::device()))
 				return false;
+			g_imgui_device = d3d::device();
 
 			// the game window is ANSI; subclassing it with a W procedure would make it Unicode
 			g_unicode = IsWindowUnicode(hwnd) != FALSE;
@@ -197,16 +204,25 @@ namespace tb::menu
 			auto* device = d3d::device();
 			IDirect3DSurface9* back = nullptr;
 			IDirect3DSurface9* old_rt = nullptr;
+			IDirect3DSurface9* old_ds = nullptr;
 			if (FAILED(chain->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &back)))
 				return;
+			D3DVIEWPORT9 old_viewport{};
+			device->GetViewport(&old_viewport);
 			device->GetRenderTarget(0, &old_rt);
+			device->GetDepthStencilSurface(&old_ds);
 			device->SetRenderTarget(0, back);
+			device->SetDepthStencilSurface(nullptr);
 			if (SUCCEEDED(device->BeginScene()))
 			{
 				ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 				device->EndScene();
 			}
 			device->SetRenderTarget(0, old_rt);
+			device->SetDepthStencilSurface(old_ds);
+			device->SetViewport(&old_viewport);
+			if (old_ds)
+				old_ds->Release();
 			if (old_rt)
 				old_rt->Release();
 			back->Release();
@@ -220,6 +236,13 @@ namespace tb::menu
 				g_imgui_failed = !g_imgui_ready;
 				if (g_imgui_failed)
 					tb::log("menu", "ImGui init failed; menu unavailable");
+			}
+			if (g_imgui_ready && d3d::device() != g_imgui_device)
+			{
+				ImGui_ImplDX9_Shutdown();
+				g_imgui_device = d3d::device();
+				ImGui_ImplDX9_Init(g_imgui_device);
+				tb::log("menu", "moved to the new device");
 			}
 			if (g_imgui_ready)
 				draw(chain);
@@ -248,16 +271,10 @@ namespace tb::menu
 			});
 		}
 
+		// the window keeps our procedure: the module is pinned and never unloaded
 		void pre_destroy() override
 		{
-			config::save();
-			if (g_old_wndproc && g_hwnd)
-			{
-				if (g_unicode)
-					SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_old_wndproc));
-				else
-					SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_old_wndproc));
-			}
+			config::save_final();
 		}
 	};
 }

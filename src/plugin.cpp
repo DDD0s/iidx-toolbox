@@ -4,6 +4,7 @@
 
 #include "core/component.hpp"
 #include "core/config.hpp"
+#include "core/d3d.hpp"
 #include "core/log.hpp"
 #include "core/module.hpp"
 #include "core/paths.hpp"
@@ -81,6 +82,7 @@ namespace
 				tb::log("toolbox", "%s: not installed (%s)", entry.name.c_str(), e.what());
 			}
 		}
+		tb::d3d::set_ready();
 		tb::log("toolbox", "%zu components loaded", g_components.size());
 	}
 
@@ -88,7 +90,7 @@ namespace
 	{
 		tb::paths::set_directory(self_directory());
 		tb::config::load();
-		tb::log("toolbox", "IIDX Toolbox 1.0 (built " __DATE__ " " __TIME__ ") loading");
+		tb::log("toolbox", "IIDX Toolbox 1.0.1 (built " __DATE__ " " __TIME__ ") loading");
 
 		if (const HMODULE h = find_game_module())
 		{
@@ -110,13 +112,17 @@ namespace
 		}).detach();
 	}
 
-	void shutdown()
+	// hooks stay installed: spice can call this from another thread while the game still runs
+	void shutdown(bool process_exit)
 	{
 		if (g_shut_down.exchange(true))
 			return;
 		for (auto& component : g_components)
 			component->pre_destroy();
-		tb::flush_log();
+		if (process_exit)
+			tb::flush_log_at_exit();
+		else
+			tb::flush_log();
 	}
 
 	struct spice_sdk_v0
@@ -129,7 +135,7 @@ namespace
 
 	void __cdecl spice_destroy()
 	{
-		shutdown();
+		shutdown(false);
 	}
 }
 
@@ -150,17 +156,22 @@ extern "C" __declspec(dllexport) void __cdecl iidx_toolbox_init()
 
 extern "C" __declspec(dllexport) void __cdecl iidx_toolbox_shutdown()
 {
-	shutdown();
+	shutdown(false);
 }
 
-// spice2x -k only calls LoadLibrary. Init runs on a thread, which starts once
-// the loader lock is released, well before the game creates its D3D device.
+// Some spice2x builds only call LoadLibrary for -k modules, newer ones also call
+// spice_sdk_entry_point; both lead to one init. The thread starts once the
+// loader lock is released, well before the game creates its D3D device.
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
 	if (reason == DLL_PROCESS_ATTACH)
 	{
 		g_self = instance;
 		DisableThreadLibraryCalls(instance);
+		// hooks point into this module: it must never be unloaded
+		HMODULE pinned = nullptr;
+		GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+			reinterpret_cast<LPCWSTR>(&DllMain), &pinned);
 		const HANDLE thread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
 			std::call_once(g_init_once, init);
 			return 0;
@@ -170,7 +181,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 	}
 	else if (reason == DLL_PROCESS_DETACH && reserved)
 	{
-		shutdown();
+		shutdown(true);
 	}
 	return TRUE;
 }

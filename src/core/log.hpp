@@ -5,5 +5,6 @@
 namespace tb
 {
 	void log(const char* tag, const char* fmt, ...);
-	void flush_log();
+	void flush_log();         // stops the writer thread after it wrote everything
+	void flush_log_at_exit(); // process exit: other threads are gone, write directly
 }

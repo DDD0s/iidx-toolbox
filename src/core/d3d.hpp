@@ -17,4 +17,7 @@ namespace tb::d3d
 	void on_after_reset(device_callback callback);
 
 	IDirect3DDevice9* device();
+
+	// callbacks run only after every component has registered its own
+	void set_ready();
 }

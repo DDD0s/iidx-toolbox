@@ -33,16 +33,39 @@ namespace tb::effects
 			return g_color(layer, r, g, b, a);
 		}
 
+		// judgement opacity of the current stage: the combo digits use it every frame,
+		// so a change in the menu reaches judgement text and combo at the same time
+		std::atomic<int> g_stage_judge{ 100 };
+
 		// the four wrapped functions take at most four integer or pointer arguments
-		template <hook::detour& Detour, std::atomic<int>& Percent>
-		uint64_t with_alpha(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
+		uint64_t call_with_alpha(hook::detour& detour, int percent, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
 		{
 			const float previous = g_alpha;
-			const int percent = Percent.load();
 			g_alpha = percent >= 100 ? -1.f : static_cast<float>(std::max(percent, 0)) / 100.f;
-			const auto result = Detour.template invoke<uint64_t>(a, b, c, d);
+			const auto result = detour.invoke<uint64_t>(a, b, c, d);
 			g_alpha = previous;
 			return result;
+		}
+
+		uint64_t bomb_stub(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
+		{
+			return call_with_alpha(g_bomb, config::bomb_opacity.load(), a, b, c, d);
+		}
+
+		uint64_t beam_stub(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
+		{
+			return call_with_alpha(g_beam, config::beam_opacity.load(), a, b, c, d);
+		}
+
+		uint64_t judge_stub(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
+		{
+			g_stage_judge = config::judge_opacity.load();
+			return call_with_alpha(g_judge, g_stage_judge.load(), a, b, c, d);
+		}
+
+		uint64_t combo_stub(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
+		{
+			return call_with_alpha(g_combo, g_stage_judge.load(), a, b, c, d);
 		}
 
 		struct patch_t
@@ -101,10 +124,19 @@ namespace tb::effects
 				return false;
 			}
 
-			g_bomb.create(bomb, reinterpret_cast<void*>(&with_alpha<g_bomb, config::bomb_opacity>));
-			g_beam.create(beam, reinterpret_cast<void*>(&with_alpha<g_beam, config::beam_opacity>));
-			g_judge.create(judge, reinterpret_cast<void*>(&with_alpha<g_judge, config::judge_opacity>));
-			g_combo.create(combo, reinterpret_cast<void*>(&with_alpha<g_combo, config::judge_opacity>));
+			try
+			{
+				g_bomb.create(bomb, reinterpret_cast<void*>(&bomb_stub));
+				g_beam.create(beam, reinterpret_cast<void*>(&beam_stub));
+				g_judge.create(judge, reinterpret_cast<void*>(&judge_stub));
+				g_combo.create(combo, reinterpret_cast<void*>(&combo_stub));
+			}
+			catch (const std::exception& ex)
+			{
+				// wrappers already installed only set g_alpha, which nothing reads without the slot hook
+				tb::log("effects", "opacity: %s, not installed", ex.what());
+				return false;
+			}
 			g_color = reinterpret_cast<afp_color_t>(*g_color_slot);
 			hook::set<void*>(g_color_slot, reinterpret_cast<void*>(&color_stub));
 			return true;
@@ -138,13 +170,6 @@ namespace tb::effects
 				g_pgreat_blue.at ? "ok" : "missing", g_no_blink.at ? "ok" : "missing");
 		}
 
-		void pre_destroy() override
-		{
-			g_pgreat_blue.set(false);
-			g_no_blink.set(false);
-			if (g_color_slot && g_color)
-				hook::set<void*>(g_color_slot, reinterpret_cast<void*>(g_color));
-		}
 	};
 }
 

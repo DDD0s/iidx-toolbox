@@ -10,7 +10,8 @@ namespace tb::hook
 	{
 	public:
 		detour() = default;
-		~detour() { this->clear(); }
+		// never removed on destruction: at exit another thread may still be inside a stub
+		~detour() = default;
 		detour(const detour&) = delete;
 		detour& operator=(const detour&) = delete;
 

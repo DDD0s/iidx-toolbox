@@ -11,8 +11,8 @@ if not defined VS (
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 for %%d in (minhook imgui core features) do if not exist "%ROOT%build\obj\%%d" mkdir "%ROOT%build\obj\%%d"
 set INC=/I "%ROOT%src" /I "%ROOT%src\core" /I "%ROOT%vendor\minhook\include" /I "%ROOT%vendor\imgui" /I "%ROOT%vendor\imgui\backends"
-set CXX=cl /nologo /O2 /MT /utf-8 /std:c++latest /EHsc /DNOMINMAX %INC%
-cl /nologo /O2 /MT /W3 /Fo"%ROOT%build\obj\minhook\\" /c "%ROOT%vendor\minhook\src\buffer.c" "%ROOT%vendor\minhook\src\hook.c" "%ROOT%vendor\minhook\src\trampoline.c" "%ROOT%vendor\minhook\src\hde\hde64.c" || exit /b 1
+set CXX=cl /nologo /O2 /MT /utf-8 /std:c++latest /EHsc /DNOMINMAX /DNDEBUG %INC%
+cl /nologo /O2 /MT /W3 /DNDEBUG /Fo"%ROOT%build\obj\minhook\\" /c "%ROOT%vendor\minhook\src\buffer.c" "%ROOT%vendor\minhook\src\hook.c" "%ROOT%vendor\minhook\src\trampoline.c" "%ROOT%vendor\minhook\src\hde\hde64.c" || exit /b 1
 %CXX% /W3 /Fo"%ROOT%build\obj\imgui\\" /c "%ROOT%vendor\imgui\imgui*.cpp" "%ROOT%vendor\imgui\backends\imgui_impl_dx9.cpp" || exit /b 1
 %CXX% /W4 /WX /Fo"%ROOT%build\obj\core\\" /c "%ROOT%src\plugin.cpp" "%ROOT%src\core\*.cpp" || exit /b 1
 if exist "%ROOT%src\features\*.cpp" (

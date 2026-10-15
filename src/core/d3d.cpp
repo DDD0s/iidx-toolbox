@@ -21,6 +21,20 @@ namespace tb::d3d
 		hook::detour g_reset_ex;
 		std::once_flag g_device_once;
 
+		std::atomic<bool> g_ready{ false };
+		std::atomic<ULONGLONG> g_last_main_present{ 0 };
+		std::atomic<HWND> g_main_window{ nullptr };
+
+		HWND chain_window(IDirect3DSwapChain9* chain, IDirect3DDevice9* device)
+		{
+			D3DPRESENT_PARAMETERS pp{};
+			if (SUCCEEDED(chain->GetPresentParameters(&pp)) && pp.hDeviceWindow)
+				return pp.hDeviceWindow;
+			D3DDEVICE_CREATION_PARAMETERS cp{};
+			if (SUCCEEDED(device->GetCreationParameters(&cp)))
+				return cp.hFocusWindow;
+			return nullptr;
+		}
 		std::atomic<IDirect3DDevice9*> g_device{ nullptr };
 		std::atomic<IDirect3DSwapChain9*> g_main_chain{ nullptr };
 		thread_local bool g_inside = false;
@@ -39,10 +53,43 @@ namespace tb::d3d
 			}
 		}
 
+		// a device created first and released later (or replaced) must not keep the
+		// callbacks: when the main chain has been silent for a second, the implicit
+		// chain of another HAL device on the same window takes over (never a second
+		// screen's device)
+		void maybe_readopt(IDirect3DSwapChain9* chain)
+		{
+			const ULONGLONG now = GetTickCount64();
+			if (now - g_last_main_present.load() < 1000)
+				return;
+			IDirect3DDevice9* device = nullptr;
+			if (FAILED(chain->GetDevice(&device)) || !device)
+				return;
+			D3DDEVICE_CREATION_PARAMETERS cp{};
+			IDirect3DSwapChain9* first = nullptr;
+			if (SUCCEEDED(device->GetCreationParameters(&cp)) && cp.DeviceType == D3DDEVTYPE_HAL &&
+				SUCCEEDED(device->GetSwapChain(0, &first)) && first)
+			{
+				if (first == chain && chain_window(chain, device) == g_main_window.load())
+				{
+					g_device = device;
+					g_main_chain = chain;
+					g_last_main_present = now;
+					tb::log("d3d", "main swap chain is now %p (device %p)", static_cast<void*>(chain), static_cast<void*>(device));
+				}
+				first->Release();
+			}
+			device->Release();
+		}
+
 		HRESULT STDMETHODCALLTYPE present_stub(IDirect3DSwapChain9* chain, const RECT* src, const RECT* dst,
 			HWND override_window, const RGNDATA* dirty, DWORD flags)
 		{
-			const bool main = !g_inside && chain == g_main_chain.load();
+			if (!g_inside && chain != g_main_chain.load() && g_ready.load(std::memory_order_acquire))
+				maybe_readopt(chain);
+			const bool main = g_ready.load(std::memory_order_acquire) && !g_inside && chain == g_main_chain.load();
+			if (main)
+				g_last_main_present = GetTickCount64();
 			if (main)
 			{
 				g_inside = true;
@@ -57,7 +104,7 @@ namespace tb::d3d
 
 		HRESULT STDMETHODCALLTYPE reset_stub(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp)
 		{
-			const bool ours = device == g_device.load();
+			const bool ours = g_ready.load(std::memory_order_acquire) && device == g_device.load();
 			if (ours)
 				for (auto& callback : g_before_reset)
 					callback(device);
@@ -74,7 +121,7 @@ namespace tb::d3d
 
 		HRESULT STDMETHODCALLTYPE reset_ex_stub(IDirect3DDevice9Ex* device, D3DPRESENT_PARAMETERS* pp, D3DDISPLAYMODEEX* mode)
 		{
-			const bool ours = device == g_device.load();
+			const bool ours = g_ready.load(std::memory_order_acquire) && device == g_device.load();
 			if (ours)
 				for (auto& callback : g_before_reset)
 					callback(device);
@@ -89,6 +136,19 @@ namespace tb::d3d
 			return hr;
 		}
 
+		void try_hook(hook::detour& detour, void* place, void* target, const char* name)
+		{
+			try
+			{
+				detour.create(place, target);
+			}
+			catch (const std::exception& e)
+			{
+				tb::log("d3d", "%s not hooked (%s)", name, e.what());
+			}
+		}
+
+		// runs inside the game's CreateDevice: nothing may throw out of here
 		void adopt_device(IDirect3DDevice9* device)
 		{
 			std::call_once(g_device_once, [device] {
@@ -103,9 +163,16 @@ namespace tb::d3d
 				chain->Release();
 				g_device = device;
 				refresh_main_chain();
-				g_present.create(chain_vt[3], reinterpret_cast<void*>(&present_stub));
-				g_reset.create(device_vt[16], reinterpret_cast<void*>(&reset_stub));
-				g_reset_ex.create(device_vt[132], reinterpret_cast<void*>(&reset_ex_stub));
+				g_main_window = chain_window(g_main_chain.load(), device);
+				g_last_main_present = GetTickCount64();
+				try_hook(g_present, chain_vt[3], reinterpret_cast<void*>(&present_stub), "Present");
+				try_hook(g_reset, device_vt[16], reinterpret_cast<void*>(&reset_stub), "Reset");
+				IDirect3DDevice9Ex* is_ex = nullptr;
+				if (SUCCEEDED(device->QueryInterface(__uuidof(IDirect3DDevice9Ex), reinterpret_cast<void**>(&is_ex))) && is_ex)
+				{
+					is_ex->Release();
+					try_hook(g_reset_ex, device_vt[132], reinterpret_cast<void*>(&reset_ex_stub), "ResetEx");
+				}
 				UINT latency = 0;
 				IDirect3DDevice9Ex* ex = nullptr;
 				if (SUCCEEDED(device->QueryInterface(__uuidof(IDirect3DDevice9Ex), reinterpret_cast<void**>(&ex))) && ex)
@@ -145,6 +212,11 @@ namespace tb::d3d
 		return g_device.load();
 	}
 
+	void set_ready()
+	{
+		g_ready.store(true, std::memory_order_release);
+	}
+
 	// spice2x loads the module before the game creates its device. The callbacks
 	// are registered by components with a higher priority number, before any frame.
 	class component final : public component_interface
@@ -166,14 +238,6 @@ namespace tb::d3d
 			tb::log("d3d", "waiting for the game's device");
 		}
 
-		void pre_destroy() override
-		{
-			g_present.clear();
-			g_reset.clear();
-			g_reset_ex.clear();
-			g_create_device.clear();
-			g_create_device_ex.clear();
-		}
 	};
 }
 

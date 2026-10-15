@@ -314,7 +314,9 @@ namespace tb::menu_ui
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 
 			ImGui::BeginDisabled(drawn);
-			if (g_order_invalid[side])
+			// InputText can change g_order_invalid; pop exactly what was pushed
+			const bool marked = g_order_invalid[side];
+			if (marked)
 				ImGui::PushStyleColor(ImGuiCol_FrameBg, k_error);
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 4.f * (button_w + spacing));
 			if (ImGui::InputText("##order", g_order_buf[side], sizeof(g_order_buf[side]), ImGuiInputTextFlags_CallbackCharFilter, digit_filter))
@@ -328,7 +330,7 @@ namespace tb::menu_ui
 				}
 			}
 			g_order_editing[side] = ImGui::IsItemActive();
-			if (g_order_invalid[side])
+			if (marked)
 				ImGui::PopStyleColor();
 			ImGui::SameLine();
 			if (pill(k_label_normal, false, button_w))
