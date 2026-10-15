@@ -445,7 +445,7 @@ namespace tb::menu_ui
 
 		const auto before = config::get_random();
 		auto after = before;
-		bool changed = toggle("Random Fix", &after.enabled);
+		bool changed = toggle("RANDOM FIX", &after.enabled);
 		if (after.enabled)
 		{
 			for (int side = 0; side < 2; ++side)

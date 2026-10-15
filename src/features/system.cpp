@@ -26,12 +26,21 @@ namespace tb::system
 			return buffer;
 		}
 
+		// MMCSS sets the thread priority within its own range (16-22 for "Games") and
+		// drops it to 1-7 once its share is used up; with a high or realtime priority
+		// class (spice2x -processpriority) that lowers the render thread instead.
 		void render_thread_mmcss(IDirect3DSwapChain9*)
 		{
 			static bool done = false;
 			if (done)
 				return;
 			done = true;
+			const DWORD cls = GetPriorityClass(GetCurrentProcess());
+			if (cls == HIGH_PRIORITY_CLASS || cls == REALTIME_PRIORITY_CLASS)
+			{
+				tb::log("system", "MMCSS skipped: process priority is already %s", cls == HIGH_PRIORITY_CLASS ? "high" : "realtime");
+				return;
+			}
 			DWORD task = 0;
 			if (AvSetMmThreadCharacteristicsW(L"Games", &task))
 				tb::log("system", "render thread %lu registered with MMCSS \"Games\"", GetCurrentThreadId());
