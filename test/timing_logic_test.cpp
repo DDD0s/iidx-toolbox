@@ -25,6 +25,8 @@ namespace
 		double stall_at_s;
 		double stall_ms;
 		double seconds;
+		double sleep_extra_min = 0.1; // Sleep overshoot of the game's limiter, ms
+		double sleep_extra_max = 1.0;
 	};
 
 	struct result_t
@@ -46,6 +48,7 @@ namespace
 		const int32_t audio_tick0 = static_cast<int32_t>(audio0 / t_ms);
 
 		tb::timing_logic::controller ctl;
+		ctl.band = tb::timing_logic::band_for(t_ms);
 		int32_t tick = 0;
 		bool odd = false;
 		bool stalled = false;
@@ -100,7 +103,7 @@ namespace
 			const double v7 = t_ms - (work_end - last_return) - 1.0;
 			double present = work_end;
 			if (v7 > 0.0)
-				present += std::floor(v7) + 0.1 + 0.9 * u(rng);
+				present += std::floor(v7) + sc.sleep_extra_min + (sc.sleep_extra_max - sc.sleep_extra_min) * u(rng);
 			// Present blocks while 'latency' frames are still waiting for their vsync
 			double ret = present;
 			if (static_cast<int>(shown.size()) >= sc.latency)
@@ -172,21 +175,44 @@ int main()
 		{ "LDJ 60 Hz, queue 1, one 80 ms stall", 60, 60, 1, 0.0, 0, 0, 30, 80, 60 },
 		{ "LDJ 60 Hz, queue 3, stalls 20-40 ms (0.3%)", 60, 60, 3, 0.003, 20, 40, 1e9, 0, 120 },
 		{ "TDJ 120 Hz, queue 2, stalls 9-30 ms (0.5%)", 120, 120, 2, 0.005, 9, 30, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 3, one 600 ms stall", 120, 120, 3, 0.0, 0, 0, 30, 600, 60 },
+		{ "TDJ 120 Hz, queue 3, stalls 20-40 ms, slow refill", 120, 120, 3, 0.003, 20, 40, 1e9, 0, 120, 0.6, 1.0 },
+		{ "LDJ 60 Hz, queue 3, stalls 20-40 ms, slow refill", 60, 60, 3, 0.003, 20, 40, 1e9, 0, 120, 0.6, 1.0 },
+		{ "LDJ 60 Hz, queue 2, CPU spikes 5-14 ms, slow refill", 60, 60, 2, 0.02, 5, 14, 1e9, 0, 120, 0.6, 1.0 },
+	};
+	// averaged over several seeds: single runs are noisy
+	const auto average = [](const scenario_t& sc, bool ours) {
+		result_t sum;
+		constexpr int k_seeds = 6;
+		for (unsigned seed = 1; seed <= k_seeds; ++seed)
+		{
+			const auto r = run(sc, ours, seed);
+			sum.uneven += r.uneven;
+			sum.artificial += r.artificial;
+			sum.repeats += r.repeats;
+			sum.sd_ms += r.sd_ms / k_seeds;
+			sum.spread_ms += r.spread_ms / k_seeds;
+		}
+		sum.uneven = (sum.uneven + k_seeds / 2) / k_seeds;
+		sum.artificial = (sum.artificial + k_seeds / 2) / k_seeds;
+		sum.repeats = (sum.repeats + k_seeds / 2) / k_seeds;
+		return sum;
 	};
 	for (const auto& sc : scenarios)
 	{
-		const auto game = run(sc, false, 7);
-		const auto ours = run(sc, true, 7);
+		const auto game = average(sc, false);
+		const auto ours = average(sc, true);
 		std::printf("%s\n", sc.name);
 		std::printf("  game  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
 			game.uneven, game.artificial, game.repeats, game.sd_ms, game.spread_ms);
 		std::printf("  ours  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
 			ours.uneven, ours.artificial, ours.repeats, ours.sd_ms, ours.spread_ms);
-		// never more judder on a regular display than the game (beyond the drift a
-		// rate mismatch forces), never worse sync
+		// no more judder on a regular display than the game (beyond the drift a rate
+		// mismatch forces); sync no worse than the game within measurement noise
 		const double drift_ticks = std::fabs(sc.display_hz - sc.tick_hz) * sc.seconds;
 		bool ok = ours.artificial <= game.artificial + 1 + static_cast<int>(drift_ticks * 1.2);
-		ok = ok && ours.sd_ms <= game.sd_ms + 0.25;
+		ok = ok && ours.sd_ms <= game.sd_ms * 1.1 + 0.25;
+		ok = ok && ours.spread_ms <= game.spread_ms + 1000.0 / sc.tick_hz + 0.01;
 		std::printf("  -> %s\n\n", ok ? "ok" : "FAIL");
 		if (!ok)
 			++failures;

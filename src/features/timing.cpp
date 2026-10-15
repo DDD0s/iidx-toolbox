@@ -2,6 +2,7 @@
 
 #include "component.hpp"
 #include "config.hpp"
+#include "d3d.hpp"
 #include "hook.hpp"
 #include "log.hpp"
 #include "module.hpp"
@@ -41,6 +42,7 @@ namespace tb::timing
 			bool reported = false;
 		} g_song;
 		double g_frame_ms = 0.0; // smoothed step interval, kept across songs
+		int g_long_run = 0;      // consecutive frames longer than 1.5 ticks
 		bool g_active = false;
 
 		int64_t qpc()
@@ -96,9 +98,17 @@ namespace tb::timing
 			{
 				const double dt = static_cast<double>(now - s.last) / g_qpc_per_ms;
 				if (dt > ms_per_tick * 1.5)
+				{
 					++s.long_frames;
+					// a lasting lower frame rate, not a stall
+					if (++g_long_run >= 30)
+						g_frame_ms = dt;
+				}
 				else if (dt > 0.0)
+				{
+					g_long_run = 0;
 					g_frame_ms = g_frame_ms > 0.0 ? g_frame_ms + (dt - g_frame_ms) * 0.05 : dt;
+				}
 			}
 			s.last = now;
 
@@ -106,6 +116,7 @@ namespace tb::timing
 			if (matched != g_active)
 			{
 				g_active = matched;
+				s.ctl.reset_confirmation();
 				tb::log("timing", matched ? "frames %.3f ms match the tick (%.3f ms): millisecond clock on"
 					: "frames %.3f ms do not match the tick (%.3f ms): game stepping", g_frame_ms, ms_per_tick);
 			}
@@ -123,6 +134,7 @@ namespace tb::timing
 					s.ctl.observe_audio(clock_pos, audio_tick0 + audio_ms / static_cast<double>(ms_per_tick));
 			}
 
+			s.ctl.band = timing_logic::band_for(ms_per_tick);
 			const int32_t want = s.ctl.target(tick, end, clock_pos);
 			if (want < 0)
 				return;
@@ -138,6 +150,13 @@ namespace tb::timing
 
 		bool step_stub(uint8_t* chart)
 		{
+			static bool checked = false;
+			if (!checked)
+			{
+				checked = true;
+				if (!d3d::device())
+					tb::log("timing", "playing without a hooked D3D device: menu, PGREAT BLUE and NO BLINK are unavailable");
+			}
 			if (config::timing_enabled && chart)
 				steer(chart);
 			return g_step.invoke<bool>(chart);
