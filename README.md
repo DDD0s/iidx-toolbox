@@ -1,43 +1,81 @@
 # IIDX Toolbox
 
-A spice2x module for the arcade game (bm2dx.dll). Load it with `spice64.exe -k iidx_toolbox.dll`
-(or any loader that calls `iidx_toolbox_init`). Settings live in `iidx_toolbox.ini` next to the
-DLL; the log is `iidx_toolbox.log` (previous run: `.log.1`).
+为街机版 IIDX提供额外功能。
 
-## Features
+## 安装与启动
 
-| Feature | What it does |
-|---|---|
-| Menu | Opens with Insert (`[general] MenuKey`). Mouse driven. Settings are saved when it closes. |
-| Random Fix | Replaces the lanes of a RANDOM play with a chosen order. Per side: a fixed order, the ran button (new random order every play) or the group button (white and black keys keep their places, numbers shuffled within each colour). Stays out of the way when a lane ticket is armed. |
-| ALL SCRATCH / ALL CHARGE | Rewrites the chart at load. The play is reported as an AUTO SCRATCH assist play (ASSIST CLEAR lamp, no ranked score). |
-| Opacity | Bombs, key beams and judgement text (with combo), each 75 / 50 / 25 / 0 % or a manual value; nothing selected = 100 % (unchanged). Takes effect from the next stage. |
-| PGREAT BLUE | PGREAT stays on the blue variant instead of cycling white/pink/blue. Works for every judgement design. |
-| NO BLINK | GREAT/GOOD/BAD/POOR are drawn every frame instead of blinking at 12 Hz. |
-| MS CLOCK | The chart follows the vsync on which each frame is shown, anchored to the audio position, instead of counting frames: CPU jitter inside a frame changes nothing, frames that miss vsyncs are caught up in the frame itself (a learned predictor), slow drift is corrected from the audio. Active only while frames come at the timing rate (60 Hz LDJ, 120 Hz TDJ). |
-| System | Render thread under MMCSS "Games", Windows power throttling off for the process, optional process priority (`[system]`). |
+- **启动方式：** 使用 `spice64.exe -k iidx_toolbox.dll` 挂载启动。
+- **配置文件：** 自动保存在同目录的 `iidx_toolbox.ini`，日志为 `iidx_toolbox.log`（特征码不匹配的功能会自动跳过，不会导致游戏崩溃）。
 
-## Build
+## 功能列表（默认按 Insert 呼出鼠标菜单，关闭自动保存）
 
-`build.cmd` (newest Visual Studio, x64, static CRT, /W4 /WX). Tests: `test\build_test.cmd`, then
-`build\test\random_logic_test.exe`, `build\test\timing_logic_test.exe`, and with the game DLL
-`build\test\smoke.exe <bm2dx.dll> build\iidx_toolbox.dll` / `render.exe <bm2dx.dll> <dll> <out.bmp>`.
+### 自定义乱（Random Fix）
 
-## Game sites (LDJ 2025090300 bm2dx.dll)
+- **固定排列：** 自由指定 RANDOM 的键位顺序（1P/2P 独立设置）。
+- **乱 按钮：** 每局重新随机抽一次排列。
+- **组 按钮：** 同色乱（白键只在白键间乱，黑键只在黑键间乱）。
 
-Every site is found by a signature that must match exactly once; a component whose sites are
-missing logs "not installed" and leaves the game alone.
+注：使用轨道票时会自动停止
 
-| Component | Sites |
-|---|---|
-| random_fix | arrange_apply 0x180742940 (via its call site), option getter 0x1807A46F0, predicates 0x1807B77A0 / 0x1807B79D0 / 0x1807B7920, lane ticket check 0x18058DB00 |
-| chart_mod | post chart load 0x180745BE0, assist check 0x18084CB70, reported option bits 0x1804E86A0 |
-| effects | effect alpha 0x1807B5BA0 (callers: bombs 0x18081C810, beams 0x180823150, judgement 0x180827760, combo 0x180826DF0), PGREAT colour 0x180827056, blink branch 0x1808270E3 |
-| timing | play step 0x180743DE0, chart clock 0x18B2E3B50, audio position 0x1804EA690, audio start tick 0x18073BBB0; vsync grid from IDirect3DSwapChain9Ex::GetPresentStats after each Present |
-| d3d (menu, effects, timing, system) | IDirect3D9Ex::CreateDevice(Ex) -> IDirect3DSwapChain9::Present / Reset(Ex) of the first HAL device |
+### 特殊模式（ALL SCRATCH / ALL CHARGE）
 
-## License
+强制全皿 / 全长押。开启后成绩强制算作ASSIST CLEAR。
 
-IIDX Toolbox is free software under the GNU General Public License v3.0 (see `LICENSE`).
-Vendored libraries keep their own licenses: MinHook (BSD 2-Clause, `vendor/minhook/LICENSE.txt`)
-and Dear ImGui (MIT, `vendor/imgui/LICENSE.txt`).
+### 特效透明度（Opacity）
+
+打击爆炸（Bombs）、按键光束（Key Beams）、判定文字与连击数，均可独立调节透明度（75% / 50% / 25% / 0% 或手动输入），下一首生效。
+
+### 判定视觉（PGREAT BLUE / NO BLINK）
+
+- **PGREAT BLUE：** PGREAT固定显示为蓝色，不再闪烁。
+- **NO BLINK：** GREAT 至 POOR 判定文字常亮显示。
+
+### 高精度帧同步（MS CLOCK）
+
+谱面滚动直接锚定音频位置与垂直同步（VSync），消除 CPU 波动导致的视觉卡顿、掉帧追赶和音画慢漂移（仅在标准 60Hz LDJ / 120Hz TDJ 下生效）。
+
+### 系统性能优化（System）
+
+渲染线程启用 Windows 游戏多媒体调度（MMCSS），关闭进程电源节流，可在配置中自定义进程优先级。
+
+---
+
+# IIDX Toolbox
+
+A spice2x enhancement plugin for arcade IIDX. It provides an in-game menu for custom functions.
+
+## Setup & Usage
+
+- **Load:** Run `spice64.exe -k iidx_toolbox.dll`.
+- **Config & Logs:** Saved to `iidx_toolbox.ini` and `iidx_toolbox.log` in the DLL folder. (Unsupported features on mismatched game versions are safely skipped).
+
+## Features (Press Insert for mouse menu; saves on close)
+
+### Random Fix (Per-side)
+
+- **Fixed Order:** Lock RANDOM to a custom lane order.
+- **ran:** Roll a new random order each play.
+- **group:** Shuffle white and black keys strictly within their own color groups.
+
+Note: Automatically bypassed when a Lane Ticket is used.
+
+### Chart Mods (ALL SCRATCH / ALL CHARGE)
+
+Converts charts to all scratches or all charge notes. Marks play as ASSIST CLEAR (unranked).
+
+### Opacity
+
+Set transparency (75% / 50% / 25% / 0% or custom) for Bombs, Key Beams, and Judgement/Combo text. Applies on the next stage.
+
+### Visual Tweaks
+
+- **PGREAT BLUE:** Locks PGREAT to static blue instead of cycling colors.
+- **NO BLINK:** Disables the 12 Hz blinking on GREAT/GOOD/BAD/POOR judgements.
+
+### MS CLOCK
+
+Syncs chart scrolling directly to VSync and audio position instead of frame counting. Eliminates CPU micro-stutter, catches up missed VSyncs, and prevents audio drift (Active at native 60Hz LDJ / 120Hz TDJ).
+
+### System Boost
+
+Runs render thread under MMCSS "Games" priority, disables Windows power throttling, and supports custom process priority in .ini.
