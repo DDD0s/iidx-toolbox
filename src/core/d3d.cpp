@@ -26,7 +26,6 @@ namespace tb::d3d
 		thread_local bool g_inside = false;
 
 		std::vector<chain_callback> g_before_present;
-		std::vector<chain_callback> g_after_present;
 		std::vector<device_callback> g_before_reset;
 		std::vector<device_callback> g_after_reset;
 
@@ -52,11 +51,7 @@ namespace tb::d3d
 			}
 			const auto hr = g_present.invoke<HRESULT>(chain, src, dst, override_window, dirty, flags);
 			if (main)
-			{
-				for (auto& callback : g_after_present)
-					callback(chain);
 				g_inside = false;
-			}
 			return hr;
 		}
 
@@ -111,7 +106,14 @@ namespace tb::d3d
 				g_present.create(chain_vt[3], reinterpret_cast<void*>(&present_stub));
 				g_reset.create(device_vt[16], reinterpret_cast<void*>(&reset_stub));
 				g_reset_ex.create(device_vt[132], reinterpret_cast<void*>(&reset_ex_stub));
-				tb::log("d3d", "game device %p, swap chain Present hooked", static_cast<void*>(device));
+				UINT latency = 0;
+				IDirect3DDevice9Ex* ex = nullptr;
+				if (SUCCEEDED(device->QueryInterface(__uuidof(IDirect3DDevice9Ex), reinterpret_cast<void**>(&ex))) && ex)
+				{
+					ex->GetMaximumFrameLatency(&latency);
+					ex->Release();
+				}
+				tb::log("d3d", "game device %p (max frame latency %u), swap chain Present hooked", static_cast<void*>(device), latency);
 			});
 		}
 
@@ -135,7 +137,6 @@ namespace tb::d3d
 	}
 
 	void on_before_present(chain_callback callback) { g_before_present.push_back(std::move(callback)); }
-	void on_after_present(chain_callback callback) { g_after_present.push_back(std::move(callback)); }
 	void on_before_reset(device_callback callback) { g_before_reset.push_back(std::move(callback)); }
 	void on_after_reset(device_callback callback) { g_after_reset.push_back(std::move(callback)); }
 

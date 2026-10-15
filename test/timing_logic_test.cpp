@@ -1,9 +1,11 @@
-// Frame-level simulation of the millisecond clock: a vsync grid, the game's frame
-// limiter, CPU spikes that do or do not miss a vsync, a long stall, a display
-// slightly slower than the chart, and audio in 10 ms steps. Compares the game's
-// own stepping, a time-based controller and the vsync-grid controller.
+// Simulates the play loop with the game's frame limiter, a D3D render queue
+// (Present blocks while 'latency' frames wait to be shown) and vsync, then
+// compares the game's own stepping with the millisecond clock: chart steps that
+// do not match what the display did (uneven), those on a regular display
+// (artificial judder), and chart-vs-audio deviation of what is shown.
 
 #include <cstdio>
+#include <deque>
 #include <random>
 #include <vector>
 
@@ -16,52 +18,25 @@ namespace
 		const char* name;
 		double tick_hz;
 		double display_hz;
+		int latency; // D3D maximum frame latency
 		double spike_prob;
 		double spike_min_ms;
 		double spike_max_ms;
 		double stall_at_s;
 		double stall_ms;
 		double seconds;
-		double gpu_hiccup_prob = 0.0; // the GPU delays a frame by a vsync with the step on time
 	};
 
 	struct result_t
 	{
-		int uneven = 0;     // frames whose chart step differs from what the display did
-		int artificial = 0; // of those, frames where the display itself was regular
-		int drops = 0;      // displayed frames that skipped vsyncs
-		double spread_ms = 0.0;
+		int uneven = 0;
+		int artificial = 0;
+		int repeats = 0; // vsyncs that showed an old frame again
 		double sd_ms = 0.0;
+		double spread_ms = 0.0;
 	};
 
-	// first version: clock from the step time, no confirmation
-	struct time_controller
-	{
-		double offset = 0.0;
-		bool anchored = false;
-		void observe(double clock_pos, double audio_pos)
-		{
-			const double err = audio_pos - clock_pos;
-			if (!anchored || std::fabs(err - offset) > 3.0)
-			{
-				offset = err;
-				anchored = true;
-			}
-			else
-				offset += (err - offset) * 0.02;
-		}
-		int32_t target(int32_t tick, double clock_pos) const
-		{
-			const double ideal = clock_pos + offset;
-			const int32_t nominal = tick + 1;
-			int32_t want = nominal;
-			if (std::fabs(ideal - nominal) > 0.75)
-				want = static_cast<int32_t>(std::floor(ideal + 0.5));
-			return std::clamp(want, tick, tick + 8);
-		}
-	};
-
-	result_t run(const scenario_t& sc, int method, unsigned seed)
+	result_t run(const scenario_t& sc, bool ours, unsigned seed)
 	{
 		std::mt19937 rng(seed);
 		std::uniform_real_distribution<double> u(0.0, 1.0);
@@ -71,114 +46,112 @@ namespace
 		const int32_t audio_tick0 = static_cast<int32_t>(audio0 / t_ms);
 
 		tb::timing_logic::controller ctl;
-		tb::timing_logic::miss_predictor predictor;
-		int64_t prev_start = -1;
-		double prev_phase = 0.0;
-		time_controller old;
 		int32_t tick = 0;
-		int64_t base_index = 0;
-		bool based = false;
 		bool odd = false;
-		double v = p_ms * 4; // vsync the frame starts on
 		bool stalled = false;
+		double start = 0.0;
+		double last_return = 0.0;
+		std::deque<double> shown; // display times of recent frames
+		double prev_display = -1.0;
+		int32_t prev_tick = 0;
 		std::vector<double> dev;
 		result_t r;
 		int64_t frame = 0;
-		double prev_display = -1.0;
-		int32_t prev_tick = 0;
 
-		while (v < sc.seconds * 1000.0)
+		while (start < sc.seconds * 1000.0)
 		{
 			++frame;
-			double d = 0.4 + 0.3 * u(rng);
+			double before = 0.3 + 0.3 * u(rng);
+			double after = 1.0 + 0.5 * u(rng);
 			if (u(rng) < sc.spike_prob)
-				d += sc.spike_min_ms + (sc.spike_max_ms - sc.spike_min_ms) * u(rng);
-			if (!stalled && v >= sc.stall_at_s * 1000.0)
 			{
-				d += sc.stall_ms;
+				const double spike = sc.spike_min_ms + (sc.spike_max_ms - sc.spike_min_ms) * u(rng);
+				(u(rng) < 0.5 ? before : after) += spike;
+			}
+			if (!stalled && start >= sc.stall_at_s * 1000.0)
+			{
+				before += sc.stall_ms;
 				stalled = true;
 			}
-			const double s = v + d; // play step time
-			const double audio_true = s - audio0;
-			const double audio_ms = std::floor(audio_true / 10.0) * 10.0;
 
+			const double step = start + before;
+			const double audio_true = step - audio0;
+			const double audio_ms = std::floor(audio_true / 10.0) * 10.0;
 			int32_t want = tick + 1;
-			if (method == 0)
+			if (ours)
 			{
-				odd = !odd;
-				const double chart_ms = (want - audio_tick0) * t_ms;
-				if (odd && audio_ms > 0.0 && chart_ms + 17.0 < audio_ms)
-					++want;
-			}
-			else if (method == 1)
-			{
-				const double clock_pos = s / t_ms;
-				if (audio_ms > 0.0)
-					old.observe(clock_pos, audio_tick0 + audio_ms / t_ms);
-				if (old.anchored)
-					want = old.target(tick, clock_pos);
-			}
-			else
-			{
-				const int64_t start = static_cast<int64_t>(std::llround(v / p_ms));
-				const double phase = (s - v) / p_ms;
-				if (prev_start >= 0)
-					predictor.learn(prev_phase, start - prev_start - 1);
-				prev_start = start;
-				prev_phase = phase;
-				const int64_t shown = start + 1 + predictor.vsyncs_late(phase);
-				if (!based)
-				{
-					base_index = shown;
-					based = true;
-				}
-				const double clock_pos = static_cast<double>(shown - base_index) * p_ms / t_ms;
+				const double clock_pos = step / t_ms;
 				if (audio_ms > 0.0 && (!ctl.anchored || (frame & 3) == 0))
 					ctl.observe_audio(clock_pos, audio_tick0 + audio_ms / t_ms);
-				const int32_t steered = ctl.target(tick, 1 << 30, shown, p_ms / t_ms, clock_pos);
+				const int32_t steered = ctl.target(tick, 1 << 30, clock_pos);
 				if (steered >= 0)
 					want = steered;
 			}
+			else
+			{
+				odd = !odd;
+				if (odd && audio_ms > 0.0 && (want - audio_tick0) * t_ms + 17.0 < audio_ms)
+					++want;
+			}
 			tick = want;
 
-			// limiter sleeps to 1 ms before the frame budget, then Present waits for vsync
-			const double present = std::max(s + 1.5, v + t_ms - 1.0 + 0.6 * u(rng));
-			const double gpu = u(rng) < sc.gpu_hiccup_prob ? p_ms : 0.0;
-			const double display = std::ceil((present + 0.3 + gpu) / p_ms) * p_ms;
-
-			if (prev_display > 0.0 && v > 2000.0)
+			// limiter: sleep to 1 ms before the frame budget (1 ms timer), then Present
+			const double work_end = step + after;
+			const double v7 = t_ms - (work_end - last_return) - 1.0;
+			double present = work_end;
+			if (v7 > 0.0)
+				present += std::floor(v7) + 0.1 + 0.9 * u(rng);
+			// Present blocks while 'latency' frames are still waiting for their vsync
+			double ret = present;
+			if (static_cast<int>(shown.size()) >= sc.latency)
 			{
-				const double refreshes = (display - prev_display) / p_ms;
-				const bool regular = std::fabs(refreshes - 1.0) < 0.01;
+				const double oldest = shown[shown.size() - static_cast<size_t>(sc.latency)];
+				if (oldest > present)
+					ret = oldest;
+			}
+			ret += 0.05;
+			const double ready = ret + 0.5;
+			double display = std::ceil(ready / p_ms) * p_ms;
+			if (!shown.empty())
+				display = std::max(display, shown.back() + p_ms);
+			shown.push_back(display);
+			if (shown.size() > 8)
+				shown.pop_front();
+
+			if (prev_display > 0.0 && start > 2000.0)
+			{
+				const double vsyncs = (display - prev_display) / p_ms;
+				const bool regular = std::fabs(vsyncs - 1.0) < 0.01;
 				if (!regular)
-					++r.drops;
-				const double expected = (display - prev_display) / t_ms;
-				if ((tick - prev_tick) != static_cast<int32_t>(std::llround(expected)))
+					r.repeats += static_cast<int>(std::llround(vsyncs)) - 1;
+				const auto expected = static_cast<int32_t>(std::llround((display - prev_display) / t_ms));
+				if (tick - prev_tick != expected)
 				{
 					++r.uneven;
 					if (regular)
 						++r.artificial;
 				}
-				dev.push_back(tick * t_ms - (display - audio0));
+				dev.push_back(tick * t_ms - display);
 			}
 			prev_display = display;
 			prev_tick = tick;
-			v = display;
+			last_return = ret;
+			start = ret;
 		}
 
-		double lo = 1e9, hi = -1e9, sum = 0.0;
+		double mean = 0.0, lo = 1e18, hi = -1e18;
 		for (const double x : dev)
 		{
+			mean += x;
 			lo = std::min(lo, x);
 			hi = std::max(hi, x);
-			sum += x;
 		}
-		const double mean = dev.empty() ? 0.0 : sum / static_cast<double>(dev.size());
+		mean /= static_cast<double>(std::max<size_t>(1, dev.size()));
 		double var = 0.0;
 		for (const double x : dev)
 			var += (x - mean) * (x - mean);
+		r.sd_ms = std::sqrt(var / static_cast<double>(std::max<size_t>(1, dev.size())));
 		r.spread_ms = dev.empty() ? 0.0 : hi - lo;
-		r.sd_ms = dev.empty() ? 0.0 : std::sqrt(var / static_cast<double>(dev.size()));
 		return r;
 	}
 
@@ -188,33 +161,32 @@ namespace
 int main()
 {
 	const scenario_t scenarios[] = {
-		{ "TDJ 120/120, CPU spikes 3-6 ms (2%)", 120, 120, 0.02, 3, 6, 1e9, 0, 120 },
-		{ "TDJ 120/120, spikes that miss a vsync (1%)", 120, 120, 0.01, 9, 15, 1e9, 0, 120 },
-		{ "TDJ 120/120, one 80 ms stall", 120, 120, 0.0, 0, 0, 30, 80, 60 },
-		{ "TDJ 120 ticks on 119.88 Hz", 120, 119.88, 0.02, 3, 6, 1e9, 0, 120 },
-		{ "LDJ 60/60, spikes 5-14 ms (2%)", 60, 60, 0.02, 5, 14, 1e9, 0, 120 },
-		{ "LDJ 60/60, one 80 ms stall", 60, 60, 0.0, 0, 0, 30, 80, 60 },
-		{ "TDJ 120/120, GPU hiccups (0.5%) + CPU spikes", 120, 120, 0.02, 3, 12, 1e9, 0, 120, 0.005 },
+		{ "TDJ 120 Hz, queue 3, CPU spikes 3-6 ms (2%)", 120, 120, 3, 0.02, 3, 6, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 3, stalls 9-15 ms (1%)", 120, 120, 3, 0.01, 9, 15, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 1, stalls 9-15 ms (1%)", 120, 120, 1, 0.01, 9, 15, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 3, stalls 20-40 ms (0.3%)", 120, 120, 3, 0.003, 20, 40, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 3, one 80 ms stall", 120, 120, 3, 0.0, 0, 0, 30, 80, 60 },
+		{ "TDJ 120 ticks on a 119.88 Hz display", 120, 119.88, 3, 0.02, 3, 6, 1e9, 0, 120 },
+		{ "TDJ 120 ticks on a 120.12 Hz display", 120, 120.12, 3, 0.02, 3, 6, 1e9, 0, 120 },
+		{ "LDJ 60 Hz, queue 3, CPU spikes 5-14 ms (2%)", 60, 60, 3, 0.02, 5, 14, 1e9, 0, 120 },
+		{ "LDJ 60 Hz, queue 1, one 80 ms stall", 60, 60, 1, 0.0, 0, 0, 30, 80, 60 },
+		{ "LDJ 60 Hz, queue 3, stalls 20-40 ms (0.3%)", 60, 60, 3, 0.003, 20, 40, 1e9, 0, 120 },
+		{ "TDJ 120 Hz, queue 2, stalls 9-30 ms (0.5%)", 120, 120, 2, 0.005, 9, 30, 1e9, 0, 120 },
 	};
-	const char* names[] = { "game", "time-based", "grid+predict" };
 	for (const auto& sc : scenarios)
 	{
+		const auto game = run(sc, false, 7);
+		const auto ours = run(sc, true, 7);
 		std::printf("%s\n", sc.name);
-		result_t res[3];
-		for (int m = 0; m < 3; ++m)
-		{
-			res[m] = run(sc, m, 7);
-			std::printf("  %-11s uneven %4d (artificial %4d) of %4d drops | sync spread %6.2f ms  sd %5.2f ms\n",
-				names[m], res[m].uneven, res[m].artificial, res[m].drops, res[m].spread_ms, res[m].sd_ms);
-		}
-		// the new controller must be at least as even and as well synced as both others
-		const auto& g = res[2];
-		const double tick_ms = 1000.0 / sc.tick_hz;
-		bool ok = g.uneven <= std::min(res[0].uneven, res[1].uneven) + 2;
-		// one learning transient may show in the worst case
-		ok = ok && g.spread_ms <= std::min(res[0].spread_ms, res[1].spread_ms) + tick_ms + 0.05;
-		// integer ticks: the chart may settle on either side of the audio within half a tick
-		ok = ok && g.sd_ms <= std::min(res[0].sd_ms, res[1].sd_ms) + tick_ms * 0.5 + 0.5;
+		std::printf("  game  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
+			game.uneven, game.artificial, game.repeats, game.sd_ms, game.spread_ms);
+		std::printf("  ours  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
+			ours.uneven, ours.artificial, ours.repeats, ours.sd_ms, ours.spread_ms);
+		// never more judder on a regular display than the game (beyond the drift a
+		// rate mismatch forces), never worse sync
+		const double drift_ticks = std::fabs(sc.display_hz - sc.tick_hz) * sc.seconds;
+		bool ok = ours.artificial <= game.artificial + 1 + static_cast<int>(drift_ticks * 1.2);
+		ok = ok && ours.sd_ms <= game.sd_ms + 0.25;
 		std::printf("  -> %s\n\n", ok ? "ok" : "FAIL");
 		if (!ok)
 			++failures;

@@ -13,7 +13,6 @@ namespace tb::d3d
 	using device_callback = std::function<void(IDirect3DDevice9*)>;
 
 	void on_before_present(chain_callback callback); // render thread, before the original Present
-	void on_after_present(chain_callback callback);  // render thread, after it returned
 	void on_before_reset(device_callback callback);
 	void on_after_reset(device_callback callback);
 
