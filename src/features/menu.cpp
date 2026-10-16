@@ -8,6 +8,7 @@
 #include "d3d.hpp"
 #include "log.hpp"
 #include "menu_ui.hpp"
+#include "state.hpp"
 
 namespace tb::menu
 {
@@ -176,6 +177,8 @@ namespace tb::menu
 		void set_open(bool open)
 		{
 			g_open = open;
+			state::menu_open = open;
+			tb::log("menu", open ? "opened" : "closed");
 			auto& io = ImGui::GetIO();
 			io.MouseDrawCursor = open;
 			io.ClearInputKeys();

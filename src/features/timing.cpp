@@ -6,13 +6,16 @@
 #include "hook.hpp"
 #include "log.hpp"
 #include "module.hpp"
+#include "state.hpp"
 #include "timing_logic.hpp"
 
 // MS CLOCK (timing_logic.hpp): speeds up the game's own audio catch-up after a
 // stall, never changes a step the game's single check can handle. Active only
 // while frames come at the tick rate (60 LDJ, 120 TDJ).
-// Every song gets one log line, MS CLOCK on or off: the game's catch-up ticks,
-// the ticks MS CLOCK added, and the audio lead as the game's check computes it.
+// Every song gets one log line when its chart ends (or at the next chart start if
+// it was left), MS CLOCK on or off: the game's catch-up ticks, the ticks MS CLOCK
+// added, the audio lead as the game's check computes it. Stalls and catch-ups get
+// a line each, with the song time and whether the menu was open.
 namespace tb::timing
 {
 	namespace
@@ -36,6 +39,8 @@ namespace tb::timing
 		bool g_active = false;
 		int64_t g_last_step = 0;
 
+		constexpr int k_event_lines = 30; // per song and kind
+
 		struct song_t
 		{
 			uint64_t frames = 0, long_frames = 0;
@@ -44,6 +49,9 @@ namespace tb::timing
 			int largest = 0;
 			uint64_t lead_n = 0, over17 = 0;
 			double lead_sum = 0.0, lead_min = 1e9, lead_max = -1e9;
+			double longest_ms = 0.0;
+			int stall_lines = 0, catch_up_lines = 0;
+			bool reported = false;
 		} g_song;
 
 		int64_t qpc()
@@ -56,29 +64,43 @@ namespace tb::timing
 		void report()
 		{
 			auto& s = g_song;
-			if (!s.frames)
+			if (!s.frames || s.reported)
 				return;
-			const double mean = s.lead_n ? s.lead_sum / static_cast<double>(s.lead_n) : 0.0;
-			tb::log("timing", "song: %llu frames (%llu longer than 1.5 ticks), game catch-up ticks %llu, MS CLOCK added %llu in %llu catch-ups (largest %d), audio lead at the game's check: mean %.1f ms, min %.0f, max %.0f, over 17 ms %llu of %llu%s",
-				static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.long_frames),
+			s.reported = true;
+			char lead[160];
+			if (s.lead_n)
+				sprintf_s(lead, "mean %.1f ms, min %.0f, max %.0f, over 17 ms %llu of %llu",
+					s.lead_sum / static_cast<double>(s.lead_n), s.lead_min, s.lead_max,
+					static_cast<unsigned long long>(s.over17), static_cast<unsigned long long>(s.lead_n));
+			else
+				sprintf_s(lead, "no samples");
+			tb::log("timing", "song: %llu frames (%llu longer than 1.5 ticks, longest %.1f ms), game catch-up ticks %llu, MS CLOCK added %llu in %llu catch-ups (largest %d), audio lead at the game's check: %s%s",
+				static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.long_frames), s.longest_ms,
 				static_cast<unsigned long long>(s.game_extra), static_cast<unsigned long long>(s.added),
-				static_cast<unsigned long long>(s.catch_ups), s.largest, mean,
-				s.lead_n ? s.lead_min : 0.0, s.lead_n ? s.lead_max : 0.0,
-				static_cast<unsigned long long>(s.over17), static_cast<unsigned long long>(s.lead_n),
+				static_cast<unsigned long long>(s.catch_ups), s.largest, lead,
 				s.removed ? ", WARNING: game ticks removed" : "");
-			s = {};
+		}
+
+		double song_seconds(int32_t tick, float ms_per_tick)
+		{
+			return static_cast<double>(tick) * ms_per_tick / 1000.0;
 		}
 
 		// frames at the tick rate (within 5 %); a lasting other rate turns MS CLOCK off
-		void update_rate(float ms_per_tick)
+		void update_rate(float ms_per_tick, int32_t tick)
 		{
 			const int64_t now = qpc();
 			if (g_last_step)
 			{
 				const double dt = static_cast<double>(now - g_last_step) / g_qpc_per_ms;
+				auto& s = g_song;
+				s.longest_ms = std::max(s.longest_ms, dt);
 				if (dt > ms_per_tick * 1.5)
 				{
-					++g_song.long_frames;
+					++s.long_frames;
+					if (s.stall_lines++ < k_event_lines)
+						tb::log("timing", "stall %.1f ms at %.2f s%s", dt, song_seconds(tick, ms_per_tick),
+							state::menu_open ? ", menu open" : "");
 					if (++g_long_run >= 30)
 						g_frame_ms = dt;
 				}
@@ -119,17 +141,20 @@ namespace tb::timing
 			const bool running = tick > 0 && chart[g_tick_off + 5] != 0 &&
 				*reinterpret_cast<uint64_t*>(chart + g_start_off) != 0 && target_in < end &&
 				ms_per_tick > 3.f && ms_per_tick < 34.f;
+			auto& s = g_song;
 			if (tick <= 0)
 			{
 				report();
+				s = {};
 				g_last_step = 0;
 			}
+			else if (target_in >= end)
+				report();
 
-			auto& s = g_song;
 			if (running)
 			{
 				++s.frames;
-				update_rate(ms_per_tick);
+				update_rate(ms_per_tick, tick);
 				if (config::timing_enabled && g_active && (s.frames & 1) == 0)
 				{
 					const int audio_ms = g_audio_ms(1);
@@ -142,6 +167,10 @@ namespace tb::timing
 						s.added += static_cast<uint64_t>(extra);
 						++s.catch_ups;
 						s.largest = std::max(s.largest, extra);
+						if (s.catch_up_lines++ < k_event_lines)
+							tb::log("timing", "MS CLOCK +%d ticks at %.2f s (audio lead %d ms)", extra,
+								song_seconds(tick, ms_per_tick),
+								audio_ms - timing_logic::chart_ms(target_in, audio_tick0, 1000.f / ms_per_tick));
 					}
 				}
 				if (target < target_in)
