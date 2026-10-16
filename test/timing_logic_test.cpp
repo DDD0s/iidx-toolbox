@@ -1,11 +1,10 @@
-// Simulates the play loop with the game's frame limiter, a D3D render queue
-// (Present blocks while 'latency' frames wait to be shown) and vsync, then
-// compares the game's own stepping with the millisecond clock: chart steps that
-// do not match what the display did (uneven), those on a regular display
-// (artificial judder), and chart-vs-audio deviation of what is shown.
+// MS CLOCK against the game's own step (sub_180743DE0): +1 tick per step, and at every
+// second step +1 more when the audio position leads the chart by more than 17 ms.
+// Checks that in normal play the chart is the game's, frame for frame, that after
+// stalls it ends at the game's phase, and that it gets there in fewer frames.
 
+#include <cmath>
 #include <cstdio>
-#include <deque>
 #include <random>
 #include <vector>
 
@@ -13,210 +12,176 @@
 
 namespace
 {
+	using tb::timing_logic::chart_ms;
+	using tb::timing_logic::extra_ticks;
+
+	constexpr double k_period = 1000.0 / 120.0;
+	constexpr float k_fps = 120.f;
+
 	struct scenario_t
 	{
 		const char* name;
-		double tick_hz;
-		double display_hz;
-		int latency; // D3D maximum frame latency
-		double spike_prob;
-		double spike_min_ms;
-		double spike_max_ms;
-		double stall_at_s;
-		double stall_ms;
-		double seconds;
-		double sleep_extra_min = 0.1; // Sleep overshoot of the game's limiter, ms
-		double sleep_extra_max = 1.0;
+		double lead0;       // audio lead at the game's check at song start, ms
+		double drift_ppm;   // audio clock against the display
+		double jitter_ms;   // audio position noise
+		double small_prob;  // absorbed stalls: the step runs late, no frame is lost
+		double small_max_ms;
+		int big_at;         // frame of one long stall that loses frames (0 = none)
+		double big_ms;
 	};
 
-	struct result_t
+	struct run_t
 	{
-		int uneven = 0;
-		int artificial = 0;
-		int repeats = 0; // vsyncs that showed an old frame again
-		double sd_ms = 0.0;
-		double spread_ms = 0.0;
+		std::vector<int32_t> ticks;
+		std::vector<double> leads; // audio at the step minus chart time of the processed tick
+		int removed = 0;
 	};
 
-	result_t run(const scenario_t& sc, bool ours, unsigned seed)
+	run_t run(const scenario_t& sc, bool ms_clock, unsigned seed, int parity)
 	{
 		std::mt19937 rng(seed);
 		std::uniform_real_distribution<double> u(0.0, 1.0);
-		const double t_ms = 1000.0 / sc.tick_hz;
-		const double p_ms = 1000.0 / sc.display_hz;
-		const double audio0 = 23.0;
-		const int32_t audio_tick0 = static_cast<int32_t>(audio0 / t_ms);
-
-		tb::timing_logic::controller ctl;
-		ctl.band = tb::timing_logic::band_for(t_ms);
-		int32_t tick = 0;
-		bool odd = false;
-		bool stalled = false;
-		double start = 0.0;
-		double last_return = 0.0;
-		std::deque<double> shown; // display times of recent frames
-		double prev_display = -1.0;
-		int32_t prev_tick = 0;
-		std::vector<double> dev;
-		result_t r;
-		int64_t frame = 0;
-
-		while (start < sc.seconds * 1000.0)
+		const int frames = 120 * 60;
+		run_t r;
+		int32_t tick = 1, target = 2;
+		bool check = false;
+		double shift = 0.0;   // time lost to dropped frames
+		double refill = 0.0;  // lateness of an absorbed stall still being made up
+		for (int f = 1; f < frames; ++f)
 		{
-			++frame;
-			double before = 0.3 + 0.3 * u(rng);
-			double after = 1.0 + 0.5 * u(rng);
-			if (u(rng) < sc.spike_prob)
+			double late = 0.3 + 0.3 * u(rng);
+			const double noise = (u(rng) * 2.0 - 1.0) * sc.jitter_ms;
+			const double small = u(rng) < sc.small_prob ? 1.0 + (sc.small_max_ms - 1.0) * u(rng) : 0.0;
+			if (f == sc.big_at)
 			{
-				const double spike = sc.spike_min_ms + (sc.spike_max_ms - sc.spike_min_ms) * u(rng);
-				(u(rng) < 0.5 ? before : after) += spike;
+				late += sc.big_ms;
+				shift += std::floor(sc.big_ms / k_period) * k_period;
 			}
-			if (!stalled && start >= sc.stall_at_s * 1000.0)
-			{
-				before += sc.stall_ms;
-				stalled = true;
-			}
+			refill = std::max(0.0, refill - 1.0); // the limiter makes up about 1 ms per frame
+			refill += small;
+			const double step_time = f * k_period + shift + late + refill;
+			const double audio_true = (step_time - 0.45) * (1.0 + sc.drift_ppm * 1e-6) + k_period + sc.lead0;
+			const int audio_ms = static_cast<int>(audio_true + noise + 0.1);
 
-			const double step = start + before;
-			const double audio_true = step - audio0;
-			const double audio_ms = std::floor(audio_true / 10.0) * 10.0;
-			int32_t want = tick + 1;
-			if (ours)
-			{
-				const double clock_pos = step / t_ms;
-				if (audio_ms > 0.0 && (!ctl.anchored || (frame & 3) == 0))
-					ctl.observe_audio(clock_pos, audio_tick0 + audio_ms / t_ms);
-				const int32_t steered = ctl.target(tick, 1 << 30, clock_pos);
-				if (steered >= 0)
-					want = steered;
-			}
-			else
-			{
-				odd = !odd;
-				if (odd && audio_ms > 0.0 && (want - audio_tick0) * t_ms + 17.0 < audio_ms)
-					++want;
-			}
-			tick = want;
+			const int32_t target_in = target;
+			if (ms_clock && (f & 1) == parity)
+				target += extra_ticks(audio_ms, target, 0, k_fps);
+			if (target < target_in)
+				r.removed += target_in - target;
 
-			// limiter: sleep to 1 ms before the frame budget (1 ms timer), then Present
-			const double work_end = step + after;
-			const double v7 = t_ms - (work_end - last_return) - 1.0;
-			double present = work_end;
-			if (v7 > 0.0)
-				present += std::floor(v7) + sc.sleep_extra_min + (sc.sleep_extra_max - sc.sleep_extra_min) * u(rng);
-			// Present blocks while 'latency' frames are still waiting for their vsync
-			double ret = present;
-			if (static_cast<int>(shown.size()) >= sc.latency)
+			tick = target; // process
+			check = !check;
+			if (check)
 			{
-				const double oldest = shown[shown.size() - static_cast<size_t>(sc.latency)];
-				if (oldest > present)
-					ret = oldest;
+				const int c = chart_ms(target, 0, k_fps);
+				if (audio_ms > 0 && c > 0 && c + 17 < audio_ms)
+					++target;
 			}
-			ret += 0.05;
-			const double ready = ret + 0.5;
-			double display = std::ceil(ready / p_ms) * p_ms;
-			if (!shown.empty())
-				display = std::max(display, shown.back() + p_ms);
-			shown.push_back(display);
-			if (shown.size() > 8)
-				shown.pop_front();
-
-			if (prev_display > 0.0 && start > 2000.0)
-			{
-				const double vsyncs = (display - prev_display) / p_ms;
-				const bool regular = std::fabs(vsyncs - 1.0) < 0.01;
-				if (!regular)
-					r.repeats += static_cast<int>(std::llround(vsyncs)) - 1;
-				const auto expected = static_cast<int32_t>(std::llround((display - prev_display) / t_ms));
-				if (tick - prev_tick != expected)
-				{
-					++r.uneven;
-					if (regular)
-						++r.artificial;
-				}
-				dev.push_back(tick * t_ms - display);
-			}
-			prev_display = display;
-			prev_tick = tick;
-			last_return = ret;
-			start = ret;
+			++target;
+			r.ticks.push_back(tick);
+			r.leads.push_back(audio_true - tick * k_period);
 		}
-
-		double mean = 0.0, lo = 1e18, hi = -1e18;
-		for (const double x : dev)
-		{
-			mean += x;
-			lo = std::min(lo, x);
-			hi = std::max(hi, x);
-		}
-		mean /= static_cast<double>(std::max<size_t>(1, dev.size()));
-		double var = 0.0;
-		for (const double x : dev)
-			var += (x - mean) * (x - mean);
-		r.sd_ms = std::sqrt(var / static_cast<double>(std::max<size_t>(1, dev.size())));
-		r.spread_ms = dev.empty() ? 0.0 : hi - lo;
 		return r;
 	}
 
 	int failures = 0;
+
+	void expect(bool ok, const char* what)
+	{
+		std::printf("    %s: %s\n", ok ? "ok  " : "FAIL", what);
+		if (!ok)
+			++failures;
+	}
+
+	double mean(const std::vector<double>& v, size_t from)
+	{
+		double s = 0.0;
+		for (size_t i = from; i < v.size(); ++i)
+			s += v[i];
+		return s / static_cast<double>(v.size() - from);
+	}
+
+	// frames after 'from' until the chart is back within one game check of the threshold
+	int recovery(const run_t& r, size_t from)
+	{
+		for (size_t i = from; i < r.leads.size(); ++i)
+			if (r.leads[i] <= 17.0 + k_period + 1.0)
+				return static_cast<int>(i - from);
+		return -1;
+	}
 }
 
 int main()
 {
-	const scenario_t scenarios[] = {
-		{ "TDJ 120 Hz, queue 3, CPU spikes 3-6 ms (2%)", 120, 120, 3, 0.02, 3, 6, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 3, stalls 9-15 ms (1%)", 120, 120, 3, 0.01, 9, 15, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 1, stalls 9-15 ms (1%)", 120, 120, 1, 0.01, 9, 15, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 3, stalls 20-40 ms (0.3%)", 120, 120, 3, 0.003, 20, 40, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 3, one 80 ms stall", 120, 120, 3, 0.0, 0, 0, 30, 80, 60 },
-		{ "TDJ 120 ticks on a 119.88 Hz display", 120, 119.88, 3, 0.02, 3, 6, 1e9, 0, 120 },
-		{ "TDJ 120 ticks on a 120.12 Hz display", 120, 120.12, 3, 0.02, 3, 6, 1e9, 0, 120 },
-		{ "LDJ 60 Hz, queue 3, CPU spikes 5-14 ms (2%)", 60, 60, 3, 0.02, 5, 14, 1e9, 0, 120 },
-		{ "LDJ 60 Hz, queue 1, one 80 ms stall", 60, 60, 1, 0.0, 0, 0, 30, 80, 60 },
-		{ "LDJ 60 Hz, queue 3, stalls 20-40 ms (0.3%)", 60, 60, 3, 0.003, 20, 40, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 2, stalls 9-30 ms (0.5%)", 120, 120, 2, 0.005, 9, 30, 1e9, 0, 120 },
-		{ "TDJ 120 Hz, queue 3, one 600 ms stall", 120, 120, 3, 0.0, 0, 0, 30, 600, 60 },
-		{ "TDJ 120 Hz, queue 3, stalls 20-40 ms, slow refill", 120, 120, 3, 0.003, 20, 40, 1e9, 0, 120, 0.6, 1.0 },
-		{ "LDJ 60 Hz, queue 3, stalls 20-40 ms, slow refill", 60, 60, 3, 0.003, 20, 40, 1e9, 0, 120, 0.6, 1.0 },
-		{ "LDJ 60 Hz, queue 2, CPU spikes 5-14 ms, slow refill", 60, 60, 2, 0.02, 5, 14, 1e9, 0, 120, 0.6, 1.0 },
+	// 1. normal play: identical to the game, frame for frame
+	std::printf("normal play (no stall): identical to the game\n");
+	int identical = 0, cases = 0;
+	for (const double drift : { 0.0, 100.0, -100.0 })
+		for (double lead = 0.0; lead <= 16.0; lead += 1.0)
+			for (unsigned seed = 1; seed <= 3; ++seed)
+				for (int parity = 0; parity < 2; ++parity)
+				{
+					const scenario_t sc{ "", lead, drift, 1.0, 0.0, 0.0, 0, 0.0 };
+					const auto g = run(sc, false, seed, parity);
+					const auto o = run(sc, true, seed, parity);
+					++cases;
+					identical += g.ticks == o.ticks && o.removed == 0;
+				}
+	std::printf("    %d of %d runs identical (start lead 0-16 ms, drift 0 / +-100 ppm, audio +-1 ms)\n", identical, cases);
+	expect(identical == cases, "every step identical to the game");
+
+	// 2. disturbed play: same mean phase as the game
+	const scenario_t disturbed[] = {
+		{ "start lead 26 ms (two game catch-ups)", 26.0, 0.0, 1.0, 0.0, 0.0, 0, 0.0 },
+		{ "start lead 40 ms", 40.0, 0.0, 1.0, 0.0, 0.0, 0, 0.0 },
+		{ "absorbed stalls 1-15 ms (1 %), audio +-3 ms", 10.0, 0.0, 3.0, 0.01, 15.0, 0, 0.0 },
+		{ "absorbed stalls 1-30 ms (0.3 %), drift +100 ppm", 8.0, 100.0, 2.0, 0.003, 30.0, 0, 0.0 },
 	};
-	// averaged over several seeds: single runs are noisy
-	const auto average = [](const scenario_t& sc, bool ours) {
-		result_t sum;
-		constexpr int k_seeds = 6;
-		for (unsigned seed = 1; seed <= k_seeds; ++seed)
-		{
-			const auto r = run(sc, ours, seed);
-			sum.uneven += r.uneven;
-			sum.artificial += r.artificial;
-			sum.repeats += r.repeats;
-			sum.sd_ms += r.sd_ms / k_seeds;
-			sum.spread_ms += r.spread_ms / k_seeds;
-		}
-		sum.uneven = (sum.uneven + k_seeds / 2) / k_seeds;
-		sum.artificial = (sum.artificial + k_seeds / 2) / k_seeds;
-		sum.repeats = (sum.repeats + k_seeds / 2) / k_seeds;
-		return sum;
-	};
-	for (const auto& sc : scenarios)
+	for (const auto& sc : disturbed)
 	{
-		const auto game = average(sc, false);
-		const auto ours = average(sc, true);
 		std::printf("%s\n", sc.name);
-		std::printf("  game  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
-			game.uneven, game.artificial, game.repeats, game.sd_ms, game.spread_ms);
-		std::printf("  ours  uneven %4d (artificial %4d), %4d repeated vsyncs | sync sd %5.2f ms, spread %6.2f ms\n",
-			ours.uneven, ours.artificial, ours.repeats, ours.sd_ms, ours.spread_ms);
-		// no more judder on a regular display than the game (beyond the drift a rate
-		// mismatch forces); sync no worse than the game within measurement noise
-		const double drift_ticks = std::fabs(sc.display_hz - sc.tick_hz) * sc.seconds;
-		bool ok = ours.artificial <= game.artificial + 1 + static_cast<int>(drift_ticks * 1.2);
-		ok = ok && ours.sd_ms <= game.sd_ms * 1.1 + 0.25;
-		ok = ok && ours.spread_ms <= game.spread_ms + 1000.0 / sc.tick_hz + 0.01;
-		std::printf("  -> %s\n\n", ok ? "ok" : "FAIL");
-		if (!ok)
-			++failures;
+		double dg = 0.0, dsum = 0.0, max_abs = 0.0;
+		int removed = 0;
+		const int seeds = 20;
+		for (unsigned seed = 1; seed <= seeds; ++seed)
+		{
+			const auto g = run(sc, false, seed, 0);
+			const auto o = run(sc, true, seed, 0);
+			const double d = mean(o.leads, 240) - mean(g.leads, 240);
+			dsum += d;
+			dg += mean(g.leads, 240);
+			max_abs = std::max(max_abs, std::fabs(d));
+			removed += o.removed;
+		}
+		std::printf("    mean lead: game %.2f ms, MS CLOCK differs by %+.3f ms on average (largest single song %.2f ms)\n",
+			dg / seeds, dsum / seeds, max_abs);
+		expect(std::fabs(dsum / seeds) < 0.5, "same mean phase as the game");
+		expect(removed == 0, "no game tick removed");
 	}
+
+	// 3. long stalls that lose frames: same phase afterwards, reached sooner
+	for (const double big : { 80.0, 200.0, 600.0 })
+	{
+		char name[64];
+		std::snprintf(name, sizeof(name), "one %.0f ms stall that loses frames", big);
+		std::printf("%s\n", name);
+		const scenario_t sc{ name, 10.0, 0.0, 1.0, 0.0, 0.0, 1200, big };
+		int rg = 0, ro = 0;
+		double dsum = 0.0;
+		const int seeds = 20;
+		for (unsigned seed = 1; seed <= seeds; ++seed)
+		{
+			const auto g = run(sc, false, seed, 0);
+			const auto o = run(sc, true, seed, 0);
+			rg += recovery(g, 1199);
+			ro += recovery(o, 1199);
+			dsum += mean(o.leads, 1200 + 300) - mean(g.leads, 1200 + 300);
+		}
+		std::printf("    frames out of sync: game %d, MS CLOCK %d; phase afterwards differs by %+.3f ms\n", rg / seeds, ro / seeds, dsum / seeds);
+		expect(std::fabs(dsum / seeds) < 0.5, "same phase as the game afterwards");
+		expect(ro <= rg, "back in sync no later than the game");
+	}
+
 	std::printf(failures ? "timing_logic_test: %d FAILED\n" : "timing_logic_test: all checks passed\n", failures);
 	return failures ? 1 : 0;
 }
