@@ -90,7 +90,7 @@ namespace
 	{
 		tb::paths::set_directory(self_directory());
 		tb::config::load();
-		tb::log("toolbox", "IIDX Toolbox 1.0.3 (built " __DATE__ " " __TIME__ ") loading");
+		tb::log("toolbox", "IIDX Toolbox 1.1.0 (built " __DATE__ " " __TIME__ ") loading");
 
 		if (const HMODULE h = find_game_module())
 		{

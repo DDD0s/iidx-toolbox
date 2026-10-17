@@ -155,10 +155,34 @@ namespace tb::menu_ui
 		constexpr float k_block_w = 40.f;
 		constexpr float k_block_h = 58.f;
 		constexpr float k_block_gap = 6.f;
+		constexpr float k_flip_w = 30.f;
 
 		float key_row_width()
 		{
 			return px(k_block_w) * 7.f + px(k_block_gap) * 6.f;
+		}
+
+		// key blocks plus the flip button
+		float side_row_width()
+		{
+			return key_row_width() + px(k_block_gap) + px(k_flip_w);
+		}
+
+		// two arrows, right over left
+		void draw_flip_icon(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color)
+		{
+			const float cx = std::round((a.x + b.x) * 0.5f);
+			const float cy = std::round((a.y + b.y) * 0.5f);
+			const float half = px(8.f);
+			const float head = px(4.f);
+			const float dy = px(6.f);
+			const float thick = std::max(1.f, px(1.6f));
+			const float y1 = cy - dy;
+			const float y2 = cy + dy;
+			dl->AddLine(ImVec2(cx - half, y1), ImVec2(cx + half - head, y1), color, thick);
+			dl->AddTriangleFilled(ImVec2(cx + half, y1), ImVec2(cx + half - head, y1 - head), ImVec2(cx + half - head, y1 + head), color);
+			dl->AddLine(ImVec2(cx + half, y2), ImVec2(cx - half + head, y2), color, thick);
+			dl->AddTriangleFilled(ImVec2(cx - half, y2), ImVec2(cx - half + head, y2 - head), ImVec2(cx - half + head, y2 + head), color);
 		}
 
 		// dragging lifts a block; the others slide aside; releasing inserts it there
@@ -191,8 +215,18 @@ namespace tb::menu_ui
 				ImGui::PopID();
 			}
 			ImGui::EndDisabled();
+
+			// flips the order left to right at once; a new order is drawn every play under ran
+			const ImVec2 flip_a(origin.x + row_w + px(k_block_gap), origin.y);
+			const ImVec2 flip_b(flip_a.x + px(k_flip_w), origin.y + block_h);
+			ImGui::SetCursorScreenPos(flip_a);
+			ImGui::BeginDisabled(sc.ran);
+			const bool flip = ImGui::InvisibleButton("flip", ImVec2(px(k_flip_w), block_h)) && !sc.ran;
+			const bool flip_hover = !sc.ran && ImGui::IsItemHovered();
+			ImGui::EndDisabled();
+
 			ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + block_h));
-			ImGui::Dummy(ImVec2(row_w, 0.f));
+			ImGui::Dummy(ImVec2(side_row_width(), 0.f));
 
 			const int frame_no = ImGui::GetFrameCount();
 			if (frame_no != row.last_frame + 1)
@@ -212,6 +246,13 @@ namespace tb::menu_ui
 				for (int slot = 0; slot < 7; ++slot)
 					row.x[screen[static_cast<size_t>(slot)]] = slot * pitch;
 				row.placed = true;
+			}
+
+			if (flip)
+			{
+				sc.perm = random_logic::flip(sc.perm);
+				changed = true;
+				row.drag_key = -1;
 			}
 
 			if (row.drag_key < 0 && pressed_slot >= 0 && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.f * g_scale))
@@ -254,6 +295,8 @@ namespace tb::menu_ui
 
 			auto* dl = ImGui::GetWindowDrawList();
 			const float alpha = sc.ran ? 0.5f : 1.f;
+			dl->AddRectFilled(flip_a, flip_b, col(with_alpha(flip_hover ? k_frame_hover : k_frame, sc.ran ? 0.4f : 1.f)), px(7.f));
+			draw_flip_icon(dl, flip_a, flip_b, col(with_alpha(k_text, sc.ran ? 0.35f : 1.f)));
 			if (drop_slot >= 0)
 			{
 				const ImVec2 a(origin.x + drop_slot * pitch, origin.y);
@@ -294,7 +337,7 @@ namespace tb::menu_ui
 			ImGui::PushID(side);
 			const float pad = px(12.f);
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
-			ImGui::BeginChild("side", ImVec2(key_row_width() + pad * 2.f, 0.f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+			ImGui::BeginChild("side", ImVec2(side_row_width() + pad * 2.f, 0.f), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
 			ImGui::PopStyleVar();
 
 			const bool drawn = sc.ran || sc.group;
@@ -372,8 +415,9 @@ namespace tb::menu_ui
 
 		// ---- effects -------------------------------------------------------------
 
-		void opacity_row(const char* label, std::atomic<int>& value)
+		bool opacity_row(const char* label, std::atomic<int>& value)
 		{
+			const int start = value.load();
 			ImGui::PushID(label);
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextUnformatted(label);
@@ -396,6 +440,7 @@ namespace tb::menu_ui
 			ImGui::SameLine(0.f, px(4.f));
 			ImGui::TextUnformatted("%");
 			ImGui::PopID();
+			return value.load() != start;
 		}
 	}
 
@@ -456,6 +501,9 @@ namespace tb::menu_ui
 		if (changed)
 			config::set_random(before, after);
 
+		// every change is saved at once (background, coalesced): a game closed with the
+		// menu open or killed keeps the settings
+		bool dirty = false;
 		divider();
 		bool scratch = config::all_scratch;
 		bool charge = config::all_charge;
@@ -464,31 +512,44 @@ namespace tb::menu_ui
 			config::all_scratch = scratch;
 			if (scratch)
 				config::all_charge = false;
+			dirty = true;
 		}
 		if (toggle("ALL CHARGE", &charge))
 		{
 			config::all_charge = charge;
 			if (charge)
 				config::all_scratch = false;
+			dirty = true;
 		}
 
 		divider();
 		section("OPACITY");
-		opacity_row("BOMB", config::bomb_opacity);
-		opacity_row("KEY BEAM", config::beam_opacity);
-		opacity_row("JUDGE", config::judge_opacity);
+		dirty |= opacity_row("BOMB", config::bomb_opacity);
+		dirty |= opacity_row("KEY BEAM", config::beam_opacity);
+		dirty |= opacity_row("JUDGE", config::judge_opacity);
 		bool pgreat = config::pgreat_blue;
 		if (toggle("PGREAT BLUE", &pgreat))
+		{
 			config::pgreat_blue = pgreat;
+			dirty = true;
+		}
 		bool no_blink = config::no_blink;
 		if (toggle("NO BLINK", &no_blink))
+		{
 			config::no_blink = no_blink;
+			dirty = true;
+		}
 
 		divider();
 		bool timing = config::timing_enabled;
 		if (toggle("MS CLOCK", &timing))
+		{
 			config::timing_enabled = timing;
+			dirty = true;
+		}
 
+		if (dirty)
+			config::save();
 		ImGui::End();
 		return open;
 	}

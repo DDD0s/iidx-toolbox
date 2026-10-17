@@ -101,6 +101,16 @@ namespace tb::random_logic
 		return true;
 	}
 
+	// the same keys read right to left on screen; flipping twice restores the order
+	inline perm_t flip(const perm_t& perm)
+	{
+		const perm_t screen = inverse(perm);
+		perm_t flipped{};
+		for (size_t slot = 0; slot < 7; ++slot)
+			flipped[slot] = screen[6 - slot];
+		return inverse(flipped);
+	}
+
 	inline std::string screen_order(const perm_t& perm)
 	{
 		return to_digits(inverse(perm));

@@ -61,6 +61,19 @@ int main()
 	CHECK(cr::parse_screen_order("7654321", p) && p == perm_t{6, 5, 4, 3, 2, 1, 0});
 	CHECK(cr::parse_screen_order("1234567", p) && cr::screen_order(p) == "1234567");
 
+	// flip: screen order read right to left, colours mirrored, twice = unchanged
+	{
+		perm_t f{};
+		CHECK(cr::parse_screen_order("3572461", f));
+		const perm_t flipped = cr::flip(f);
+		CHECK(cr::is_valid_perm(flipped));
+		CHECK(cr::screen_order(flipped) == "1642753");
+		const std::string pattern = cr::color_pattern(f);
+		CHECK(cr::color_pattern(flipped) == std::string(pattern.rbegin(), pattern.rend()));
+		CHECK(cr::flip(flipped) == f);
+		CHECK(cr::screen_order(cr::flip(perm_t{0, 1, 2, 3, 4, 5, 6})) == "7654321");
+	}
+
 	CHECK(cr::is_valid_perm(perm_t{0, 1, 2, 3, 4, 5, 6}));
 	CHECK(!cr::is_valid_perm(perm_t{0, 0, 2, 3, 4, 5, 6}));
 	CHECK(!cr::is_valid_perm(perm_t{0, 1, 2, 3, 4, 5, 7}));
